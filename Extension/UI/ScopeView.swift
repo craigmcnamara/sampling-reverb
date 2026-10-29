@@ -1,9 +1,12 @@
 import MetalKit
 import SwiftUI
 
-/// The X/Y oscilloscope field. Drag to move the focus crosshair; scroll to change Focus amount.
+/// The X/Y oscilloscope field. Drag to move the focus crosshair; scroll to change Focus amount;
+/// double-click to toggle full screen.
 struct ScopeView: NSViewRepresentable {
     @ObservedObject var model: PluginModel
+    /// Stops drawing (and reading the audio unit's visual state, which has a single reader).
+    var paused = false
 
     final class Coordinator {
         var renderer: ScopeRenderer?
@@ -28,20 +31,31 @@ struct ScopeView: NSViewRepresentable {
         view.onScroll = { delta in
             model.set(.focusAmount, min(max(model.value(.focusAmount) + delta * 0.5, 0), 100))
         }
+        view.onDoubleClick = { model.scopeFullScreen.toggle() }
         return view
     }
 
-    func updateNSView(_ nsView: ScopeMTKView, context: Context) {}
+    func updateNSView(_ nsView: ScopeMTKView, context: Context) {
+        if nsView.isPaused != paused { nsView.isPaused = paused }
+    }
 }
 
 final class ScopeMTKView: MTKView {
     var onPoint: ((CGPoint, CGSize) -> Void)?
     var onScroll: ((Float) -> Void)?
+    var onDoubleClick: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseDown(with event: NSEvent) { report(event) }
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+        } else {
+            report(event)
+        }
+    }
+
     override func mouseDragged(with event: NSEvent) { report(event) }
 
     override func scrollWheel(with event: NSEvent) {

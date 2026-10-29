@@ -5,7 +5,7 @@
 
 namespace sr {
 
-enum class Unit { Percent, Seconds, Milliseconds, Decibels, Indexed, Boolean, Generic };
+enum class Unit { Percent, Seconds, Milliseconds, Decibels, Indexed, Boolean, Bpm, Generic };
 
 struct ParamSpec {
     SRParam address;
@@ -19,6 +19,11 @@ struct ParamSpec {
 inline constexpr int kIntervalCount = 6;
 inline constexpr float kIntervalSemitones[kIntervalCount] = {-12.f, -5.f, 5.f, 7.f, 12.f, 19.f};
 inline constexpr const char* kIntervalNames[kIntervalCount] = {"-12", "-5", "+5", "+7", "+12", "+19"};
+
+// Quantize grid, in quarter-note beats. A value <= 0 means one bar of the current time signature.
+inline constexpr int kGridCount = 8;
+inline constexpr double kGridBeats[kGridCount] = {0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 0.0};
+inline constexpr const char* kGridNames[kGridCount] = {"1/32", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2", "1 Bar"};
 
 inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamMix,         "mix",         "Mix",          0.f,   100.f,  50.f,  Unit::Percent,      false},
@@ -46,6 +51,14 @@ inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamFocusAmount, "focus",       "Focus",        0.f,   100.f,  0.f,   Unit::Percent,      false},
     {SRParamSub,         "sub",         "Sub",          0.f,   100.f,  0.f,   Unit::Percent,      false},
     {SRParamAttack,      "attack",      "Attack",       1.f,   2000.f, 100.f, Unit::Milliseconds, true},
+    {SRParamQuantize,    "quantize",    "Quantize",     0.f,   1.f,    0.f,   Unit::Boolean,      false},
+    {SRParamGrid,        "grid",        "Grid",         0.f,   7.f,    3.f,   Unit::Indexed,      false},
+    {SRParamTempo,       "tempo",       "Tempo",        40.f,  240.f,  120.f, Unit::Bpm,          false},
 };
+
+// Performance controls: presets leave these alone (Freeze, and the clock, which belongs to the song).
+inline constexpr bool presetLeavesAlone(uint64_t address) {
+    return address == SRParamFreeze || address == SRParamQuantize || address == SRParamGrid || address == SRParamTempo;
+}
 
 } // namespace sr

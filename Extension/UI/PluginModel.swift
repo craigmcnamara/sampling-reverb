@@ -1,6 +1,13 @@
 import AudioToolbox
 import Combine
 import Foundation
+import QuartzCore
+
+/// The tempo readout and beat light. Separate from PluginModel because it changes several times a
+/// beat, and only the clock strip should redraw for that.
+final class ClockModel: ObservableObject {
+    @Published var display = BeatDisplay(tempo: 120, fromHost: false, beatInBar: 0)
+}
 
 /// Bridges the AU parameter tree to SwiftUI. Main thread only.
 final class PluginModel: ObservableObject {
@@ -8,6 +15,9 @@ final class PluginModel: ObservableObject {
     @Published private(set) var values: [SRParam: Float] = [:]
     @Published var poolCount = 0
     @Published var frozen = false
+    /// The scope is showing in its own full-screen window (and the inline one is paused).
+    @Published var scopeFullScreen = false
+    let clock = ClockModel()
     @Published private(set) var presetSelection = PresetSelection(selected: nil)
     let presetNames: [String]
 
@@ -15,6 +25,9 @@ final class PluginModel: ObservableObject {
     private var presetObservation: NSKeyValueObservation?
     private var mappings: [SRParam: ParameterMapping] = [:]
     private let presetValues: [[UInt64: Float]]
+    private var tapTempo = TapTempo()
+    /// Performance controls that presets leave alone (see presetLeavesAlone in ParamInfo.hpp).
+    private static let presetIgnored: Set<UInt64> = Set([SRParam.freeze, .quantize, .grid, .tempo].map(\.rawValue))
 
     init(audioUnit: SRAudioUnit) {
         self.audioUnit = audioUnit
@@ -66,7 +79,7 @@ final class PluginModel: ObservableObject {
 
     var isPresetModified: Bool {
         let current = Dictionary(uniqueKeysWithValues: values.map { ($0.key.rawValue, $0.value) })
-        return presetSelection.isModified(current: current, presets: presetValues, ignoring: [SRParam.freeze.rawValue])
+        return presetSelection.isModified(current: current, presets: presetValues, ignoring: Self.presetIgnored)
     }
 
     func applyPreset(_ index: Int) {
@@ -74,9 +87,28 @@ final class PluginModel: ObservableObject {
         audioUnit.currentPreset = preset
         presetSelection = PresetSelection(selected: index)
         // The tree notifies our observer asynchronously; update now so the UI doesn't flash "modified".
-        for (address, value) in presetValues[index] where address != SRParam.freeze.rawValue {
+        for (address, value) in presetValues[index] where !Self.presetIgnored.contains(address) {
             if let id = SRParam(rawValue: address) { values[id] = value }
         }
+    }
+
+    /// Tap tempo. Only meaningful without a host tempo, which always wins.
+    func tap() {
+        if let bpm = tapTempo.tap(at: CACurrentMediaTime()) { set(.tempo, Float(bpm)) }
+    }
+
+    /// Reads the tempo and beat position from the audio unit; called once per scope frame.
+    func refreshClock() {
+        var fromHost: ObjCBool = false
+        var beat = 0.0
+        let tempo = audioUnit.currentTempo(fromHost: &fromHost, beatInBar: &beat)
+        let display = BeatDisplay(tempo: tempo, fromHost: fromHost.boolValue, beatInBar: beat)
+        if clock.display != display { clock.display = display }
+    }
+
+    /// The names of an indexed parameter's values (e.g. Grid's subdivisions).
+    func valueNames(_ id: SRParam) -> [String] {
+        audioUnit.parameterTree?.parameter(withAddress: id.rawValue)?.valueStrings ?? []
     }
 
     func display(_ id: SRParam) -> String {

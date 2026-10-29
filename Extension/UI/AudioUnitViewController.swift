@@ -5,6 +5,7 @@ import SwiftUI
 public class AudioUnitViewController: AUViewController, AUAudioUnitFactory {
     private var audioUnit: SRAudioUnit?
     private var hostingView: NSView?
+    private var scopeWindow: ScopeWindowController?
 
     public override func loadView() {
         view = NSView(frame: NSRect(origin: .zero, size: PluginView.preferredSize))
@@ -25,10 +26,12 @@ public class AudioUnitViewController: AUViewController, AUAudioUnitFactory {
 
     private func attachInterface() {
         guard hostingView == nil, isViewLoaded, let audioUnit else { return }
-        let hosting = NSHostingView(rootView: PluginView(model: PluginModel(audioUnit: audioUnit)))
+        let model = PluginModel(audioUnit: audioUnit)
+        let hosting = NSHostingView(rootView: PluginView(model: model))
         hosting.frame = view.bounds
         hosting.autoresizingMask = [.width, .height]
         view.addSubview(hosting)
         hostingView = hosting
+        scopeWindow = ScopeWindowController(model: model) { [weak self] in self?.view.window?.screen }
     }
 }

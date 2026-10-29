@@ -414,3 +414,131 @@ TEST_CASE(kernel_sub_adds_the_undertone_series) {
         CHECK(on[k] - off[k] > 15.f);
     }
 }
+
+// ---- Tempo and quantize ----------------------------------------------------------------------
+
+namespace {
+
+// Runs `in` through the kernel in small blocks, telling it the host time before each block via
+// `host(frame)`. Returns the frame at which the first new trigger fired (to within one block), or -1.
+template <typename HostFn>
+long long kernelTriggerFrame(Kernel& k, const sig::Buffer& in, long long& clock, HostFn host) {
+    constexpr int kBlock = 16;
+    const uint64_t before = k.engine().totalTriggers();
+    long long fired = -1;
+    float l[kBlock], r[kBlock];
+    for (size_t i = 0; i < in.size(); i += kBlock, clock += kBlock) {
+        const int n = static_cast<int>(std::min<size_t>(kBlock, in.size() - i));
+        k.setHostTime(host(clock));
+        k.process(&in[i], &in[i], l, r, n);
+        if (fired < 0 && k.engine().totalTriggers() != before) fired = clock;
+    }
+    return fired;
+}
+
+// Captures a note, then replays it `offset` frames after second 3. Returns {trigger, onset}.
+template <typename HostFn>
+std::pair<long long, long long> quantizedReplay(Kernel& k, long long offset, HostFn host) {
+    long long clock = 0;
+    auto tone = sig::toneBurst(440.f, 0.3f, 0.5f, kSR);
+    kernelTriggerFrame(k, tone, clock, host);
+    kernelTriggerFrame(k, sig::silence(3.f - static_cast<float>(clock) / kSR + offset / kSR, kSR), clock, host);
+    const long long onset = clock;
+    sig::append(tone, sig::silence(2.f, kSR));  // long enough to reach a whole-bar grid point
+    return {kernelTriggerFrame(k, tone, clock, host), onset};
+}
+
+} // namespace
+
+TEST_CASE(kernel_quantize_follows_the_host_transport) {
+    Kernel k;
+    k.prepare(kSR);
+    k.setParameter(SRParamLength, 0.5f);
+    k.setParameter(SRParamQuantize, 1.f);
+    k.setParameter(SRParamGrid, 5.f);    // 1/4
+    k.setParameter(SRParamTempo, 77.f);  // ignored: the host has a tempo
+    // The host plays at 100 BPM from beat 10.4, so quarter notes fall where beat is a whole number.
+    const double bpf = 100.0 / (60.0 * kSR);
+    auto host = [&](long long frame) {
+        HostTime t;
+        t.hasTempo = true;
+        t.tempo = 100.0;
+        t.hasPosition = true;
+        t.beat = 10.4 + frame * bpf;
+        t.downbeat = 8.0;
+        t.hasTransport = true;
+        t.playing = true;
+        return t;
+    };
+    const auto [fired, onset] = quantizedReplay(k, 5000, host);
+    REQUIRE(fired >= 0);
+    const double beat = 10.4 + fired * bpf;
+    CHECK(std::fabs(beat - std::round(beat)) < 16 * bpf);
+    CHECK(fired > onset + 2048);
+    CHECK(k.clock().fromHost);
+    CHECK_NEAR(k.clock().tempo, 100.0, 1e-9);
+}
+
+TEST_CASE(kernel_quantize_runs_free_at_the_tempo_parameter_without_a_host) {
+    Kernel k;
+    k.prepare(kSR);
+    k.setParameter(SRParamLength, 0.5f);
+    k.setParameter(SRParamQuantize, 1.f);
+    k.setParameter(SRParamGrid, 3.f);    // 1/8
+    k.setParameter(SRParamTempo, 90.f);  // 1/8 = 16000 frames
+    const auto [fired, onset] = quantizedReplay(k, 7000, [](long long) { return HostTime {}; });
+    REQUIRE(fired >= 0);
+    CHECK(fired % 16000 < 16 || fired % 16000 > 16000 - 16);
+    CHECK(fired > onset + 2048);
+    CHECK(!k.clock().fromHost);
+    CHECK_NEAR(k.clock().tempo, 90.0, 1e-9);
+}
+
+TEST_CASE(kernel_stopped_transport_keeps_a_running_grid_at_host_tempo) {
+    // Stopped, the host's beat stays put; the grid must keep running instead of stalling there.
+    Kernel k;
+    k.prepare(kSR);
+    k.setParameter(SRParamLength, 0.5f);
+    k.setParameter(SRParamQuantize, 1.f);
+    k.setParameter(SRParamGrid, 3.f);
+    auto host = [](long long) {
+        HostTime t;
+        t.hasTempo = true;
+        t.tempo = 120.0;
+        t.hasPosition = true;
+        t.beat = 33.3;
+        t.hasTransport = true;
+        t.playing = false;
+        return t;
+    };
+    const auto [fired, onset] = quantizedReplay(k, 2000, host);
+    REQUIRE(fired >= 0);
+    CHECK(fired > onset + 2048);
+    CHECK(fired <= onset + 2048 + 12000 + 16);
+}
+
+TEST_CASE(kernel_grid_bar_uses_the_host_time_signature) {
+    // 3/4 at 120 BPM: a bar is 3 beats = 72000 frames, counted from the downbeat at beat 0.
+    Kernel k;
+    k.prepare(kSR);
+    k.setParameter(SRParamLength, 0.5f);
+    k.setParameter(SRParamQuantize, 1.f);
+    k.setParameter(SRParamGrid, 7.f);
+    const double bpf = 120.0 / (60.0 * kSR);
+    auto host = [&](long long frame) {
+        HostTime t;
+        t.hasTempo = true;
+        t.tempo = 120.0;
+        t.hasPosition = true;
+        t.beat = frame * bpf;
+        t.barBeats = 3.0;
+        t.downbeat = std::floor(t.beat / 3.0) * 3.0;
+        t.hasTransport = true;
+        t.playing = true;
+        return t;
+    };
+    const auto [fired, onset] = quantizedReplay(k, 1000, host);
+    REQUIRE(fired >= 0);
+    CHECK(fired % 72000 < 16 || fired % 72000 > 72000 - 16);
+    CHECK(fired > onset + 2048);
+}

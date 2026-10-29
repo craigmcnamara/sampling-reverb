@@ -151,6 +151,26 @@ they near discard.
   default 100 ms) and plays the sample at its original rate. Each voice also gets a slight random pan spread.
 - A slot that is already playing can't be retriggered within 100 ms.
 
+### 3.7 Tempo and trigger quantize
+- **Clock.** Each render block, the AU reads the host's `musicalContextBlock` (tempo, beat
+  position, time signature, bar downbeat) and `transportStateBlock` (playing or not). Both are
+  cached in `allocateRenderResources`, since reading the AU's properties isn't real-time safe.
+  - While the host transport plays, the grid follows the host's beat position and bar lines.
+  - When it's stopped, or the host gives no position, the clock runs free at the host's tempo.
+  - With no host tempo at all (the standalone app), it runs at the **Tempo** parameter, which
+    the UI sets by dragging or with TAP.
+  - Without transport state, the host position only counts as playing while it moves.
+- **Quantize** (on/off) holds a matched trigger until the next **Grid** point: 1/32, 1/16, 1/8T,
+  1/8, 1/4T, 1/4, 1/2 or 1 bar (from the host time signature, 4/4 otherwise). The grid is laid
+  out from the bar line. The decision comes ~43 ms after the onset (the analysis window), so the
+  sample lands on the next grid point after that, never early.
+- A waiting slot can't be matched again or reused for a capture until it fires, so one note can't
+  queue the same sample twice. Up to 8 triggers can wait at once; if more arrive, they fire right
+  away instead of being lost.
+- Capture is not quantized: recording still starts at the onset, with its pre-roll.
+- Tempo, Quantize and Grid belong to the song, not the sound, so presets leave them alone (like
+  Freeze).
+
 ---
 
 ## 4. Reverb engine
@@ -224,6 +244,9 @@ they near discard.
 | 22 | Focus         | 0–100 %            | 0       | X/Y     |
 | 23 | Sub           | 0–100 %            | 0       | Reverb  |
 | 24 | Attack        | 1–2000 ms (exp.)   | 100     | Sampler |
+| 25 | Quantize      | off/on             | off     | Tempo   |
+| 26 | Grid          | 1/32 … 1 bar       | 1/8     | Tempo   |
+| 27 | Tempo         | 40–240 BPM         | 120     | Tempo   |
 
 New parameters are always added at the end, so the addresses in saved Live sets stay valid.
 
@@ -239,7 +262,8 @@ bottom toolbar in the plugin UI and in the host's preset menu.
   low-pass Filter with no resonance, and moderate Mod. A test checks that on strummed guitar
   its pitch layers add warmth at 62–250 Hz, keep the body, and add no brightness at 2–8 kHz.
 - Choosing a preset sets every parameter through the parameter tree, so the host sees and
-  can automate the change. Freeze is a performance control, so presets leave it alone.
+  can automate the change. Freeze, Quantize, Grid and Tempo are performance controls, so presets
+  leave them alone.
 - A "•" next to the selected preset means a knob has moved since it was chosen.
 
 All parameters are automatable in Live. Continuous parameters are smoothed with a
@@ -251,7 +275,7 @@ one-pole filter (about 20 ms) on the audio thread.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  SAMPLING REVERB                                   pool 7/24  ❄︎     │
+│  SAMPLING REVERB   (QUANTIZE) 1/8 ● 120.0 BPM [TAP]  pool 7/24  ⤢   │
 │ ┌─────────────────────────────────────────────┐  ┌───────────────┐  │
 │ │ · · · · · · · · · ·  graticule · · · · · ·  │  │ RETENTION     │  │
 │ │        ✶  (playing: particles + bloom)      │  │ SENSITIVITY   │  │
@@ -283,11 +307,25 @@ one-pole filter (about 20 ms) on the audio thread.
   vignette.
 - **Interaction**: dragging sets Focus X/Y, shown as a crosshair. The scroll wheel
   adjusts Focus amount, which also sets the size of the ring around the crosshair.
+  Double-clicking toggles full screen.
+- **Full screen**: the ⤢ button (or a double-click) opens the scope in a borderless window
+  covering the display the plugin is on, above the menu bar, with a small HUD (pool, Freeze,
+  tempo, beat light, exit). Esc, F, a double-click or the exit button closes it. The window
+  belongs to the extension process, so it works in Live as well as in the standalone app.
+  The visual state has a single reader, so the inline scope pauses while the window is open.
 
 ### 6.2 Controls (SwiftUI)
 Rotary knobs: vertical drag, Shift for fine adjustment, double-click to reset. Each knob
 binds to an `AUParameter`, and parameter observers keep the UI in sync with host
 automation. Freeze is a latching footswitch-style button.
+
+The header's clock strip has the Quantize switch, a Grid menu, a beat light (accent on the
+downbeat, amber on other beats) and the tempo. When the tempo comes from the host it reads
+HOST and can't be changed. Otherwise it reads BPM: drag it to set the tempo (Shift for fine
+adjustment), double-click to reset, or use TAP, which averages the last few taps and starts
+over after a 2 s pause. The tempo and beat come from the kernel through atomics, read once per
+scope frame. They're published on their own small `ClockModel`, so the beat light doesn't
+redraw the whole UI.
 
 ### 6.3 Visual state hand-off
 Once per render block, the kernel publishes `VisualState` into a lock-free triple
@@ -304,9 +342,15 @@ slot's trigger counter changes.
 ## 7. Standalone app
 
 - A SwiftUI window hosts the AU's view (`requestViewController`) and has a small
-  transport bar with the source (Audio Input or a looping audio file), Open File… and
-  Bypass.
-- An `AVAudioEngine` graph runs source → AU effect → main mixer → output.
+  transport bar with the source (Off, Input or a looping File), input and output device
+  pickers, Open File… and Bypass.
+- **The source always starts Off.** Live input through speakers feeds back, so listening is
+  always a deliberate choice. The chosen devices are remembered between launches; "System
+  Default" follows the system setting.
+- An `AVAudioEngine` graph runs source → AU effect → main mixer → output. Every change of
+  source or device builds a fresh engine: once an engine has touched its input node, it keeps
+  the input open, so switching away from Input wouldn't really stop listening otherwise.
+  Rebuilding re-allocates the AU, which clears the sample pool.
 - It asks for microphone permission (`NSMicrophoneUsageDescription`) and is sandboxed
   with the audio-input entitlement. Use headphones with live input to avoid feedback.
 - Launching the app once registers the embedded extension with the system, after which
@@ -361,7 +405,7 @@ docs/design.md              This document
 
 Tests are written first wherever it's practical.
 
-- **C++ DSP** (`Tests/DSP`, about 60 cases). This is a tiny built-in harness, built with
+- **C++ DSP** (`Tests/DSP`, about 85 cases). This is a tiny built-in harness, built with
   clang and with no dependencies. It covers:
   - the building blocks (delay lines, allpass energy, the SVF, the triple buffer under
     concurrency)
@@ -374,11 +418,15 @@ Tests are written first wherever it's practical.
     and left-only input, balanced wet output for left-only input, and the shifted pitch
     clearly present when on and absent when off
   - presets: Default matches the parameter defaults, every value is within range, presets
-    are distinct, and every preset rings stably with real input
+    are distinct, every preset rings stably with real input, and presets leave the clock alone
+  - quantize: triggers land exactly on the grid (straight and triplet, from the bar origin), a
+    waiting slot isn't queued twice, the kernel follows a playing host, runs free at the host
+    tempo when stopped, runs at the Tempo parameter without a host, and 1 bar follows the host
+    time signature
 - **Swift** (`Tests/Swift`, Swift Testing). The UI logic that doesn't depend on AppKit or
   Metal lives in `Extension/UI/Logic` and is compiled straight into a hostless test bundle.
   Those tests cover parameter mapping, plot coordinates, the particle system (including
-  the Metal vertex layout) and slot-change → animation events.
+  the Metal vertex layout), slot-change → animation events, tap tempo and the beat light.
 - **Integration**: `make validate` runs Apple's `auval`.
 
 ---

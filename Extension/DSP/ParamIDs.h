@@ -34,6 +34,10 @@ typedef CF_ENUM(uint64_t, SRParam) {
     // Added after 0.1: new parameters go at the end so saved states keep their addresses.
     SRParamSub,
     SRParamAttack,
+    // Tempo: trigger quantize
+    SRParamQuantize,
+    SRParamGrid,
+    SRParamTempo,
 
     SRParamCount
 };

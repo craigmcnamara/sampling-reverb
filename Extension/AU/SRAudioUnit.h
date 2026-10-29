@@ -17,6 +17,10 @@ NS_ASSUME_NONNULL_BEGIN
                   scopeCount:(NSInteger)scopeCount
                       frozen:(BOOL *_Nullable)frozen;
 
+/// The tempo the plugin is running at (the host's, or the Tempo parameter when the host has none),
+/// and the position in the bar in quarter-note beats. Any thread.
+- (double)currentTempoFromHost:(BOOL *_Nullable)fromHost beatInBar:(double *_Nullable)beatInBar;
+
 /// Parameter values for factory preset `index`, keyed by parameter address.
 - (NSDictionary<NSNumber *, NSNumber *> *)valuesForFactoryPresetAtIndex:(NSInteger)index;
 

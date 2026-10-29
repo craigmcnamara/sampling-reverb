@@ -515,3 +515,95 @@ TEST_CASE(engine_samples_cut_mid_note_fade_out_gradually) {
     if (!(nearEnd < 0.7f * middle)) std::printf("    middle %g, 100-150 ms before the end %g\n", middle, nearEnd);
     CHECK(nearEnd < 0.7f * middle);
 }
+
+// ---- Quantize --------------------------------------------------------------------------------
+
+namespace {
+
+constexpr double kBeatsPerFrame120 = 120.0 / (60.0 * kSR);
+
+// Feeds `in` one frame at a time and returns the frame (counted from the engine's start) at which
+// the next trigger fired, or -1.
+long long triggerFrame(SampleEngine& engine, const sig::Buffer& in, long long& clock) {
+    const uint64_t before = engine.totalTriggers();
+    long long fired = -1;
+    float l, r;
+    for (size_t i = 0; i < in.size(); ++i, ++clock) {
+        engine.process(&in[i], &in[i], &l, &r, 1);
+        if (fired < 0 && engine.totalTriggers() != before) fired = clock;
+    }
+    return fired;
+}
+
+struct QuantizeRig {
+    SampleEngine engine;
+    long long clock = 0;
+
+    QuantizeRig(bool quantize, double gridBeats, double barOrigin = 0.0) {
+        EngineParams p;
+        p.lengthSec = 0.5f;
+        p.quantize = quantize;
+        p.gridBeats = gridBeats;
+        engine.prepare(kSR);
+        engine.setParams(p);
+        engine.setClock({0.0, kBeatsPerFrame120, barOrigin});  // the engine extrapolates from here
+        // Capture a note, then let it land in the pool.
+        triggerFrame(engine, note(440.f), clock);
+        triggerFrame(engine, sig::silence(1.f, kSR), clock);
+    }
+
+    // Plays the same note `offset` frames after the next whole second; returns when it triggered
+    // and when it started.
+    std::pair<long long, long long> replay(long long offset) {
+        const long long target = (clock / 48000 + 1) * 48000 + offset;
+        triggerFrame(engine, sig::silence(static_cast<float>(target - clock) / kSR, kSR), clock);
+        const long long onset = clock;
+        return {triggerFrame(engine, note(440.f), clock), onset};
+    }
+};
+
+} // namespace
+
+TEST_CASE(engine_unquantized_trigger_fires_right_after_analysis) {
+    QuantizeRig rig(false, 0.5);
+    REQUIRE(rig.engine.poolCount() == 1);
+    const auto [fired, onset] = rig.replay(3000);
+    REQUIRE(fired >= 0);
+    CHECK(fired - onset < 2048 + 64);
+}
+
+TEST_CASE(engine_quantize_holds_the_trigger_until_the_next_grid_point) {
+    // 1/8 notes at 120 BPM are 12000 frames apart.
+    QuantizeRig rig(true, 0.5);
+    REQUIRE(rig.engine.poolCount() == 1);
+    for (long long offset : {3000LL, 9500LL, 13000LL}) {
+        const auto [fired, onset] = rig.replay(offset);
+        REQUIRE(fired >= 0);
+        if (fired % 12000 > 1) std::printf("    offset %lld: fired at %lld\n", offset, fired);
+        CHECK(fired % 12000 <= 1);
+        CHECK(fired > onset + 2048);
+        CHECK(fired <= onset + 2048 + 12000);
+    }
+}
+
+TEST_CASE(engine_quantize_supports_triplets_and_follows_the_bar_origin) {
+    // 1/8 triplets (1/3 beat = 8000 frames), with the bar line a quarter beat (6000 frames) in.
+    QuantizeRig rig(true, 1.0 / 3.0, 0.25);
+    const auto [fired, onset] = rig.replay(1000);
+    REQUIRE(fired >= 0);
+    CHECK(((fired - 6000) % 8000 + 8000) % 8000 <= 1);
+    CHECK(fired > onset + 2048);
+}
+
+TEST_CASE(engine_quantized_slot_is_not_triggered_twice_for_one_grid_point) {
+    // A whole bar (4 beats = 96000 frames): a second matching note while the first waits must not
+    // queue the same slot again.
+    QuantizeRig rig(true, 4.0);
+    const uint64_t before = rig.engine.totalTriggers();
+    sig::Buffer twoNotes = note(440.f, 0.2f);
+    sig::append(twoNotes, sig::silence(0.15f, kSR));
+    sig::append(twoNotes, note(440.f, 0.2f));
+    sig::append(twoNotes, sig::silence(2.f, kSR));
+    triggerFrame(rig.engine, twoNotes, rig.clock);
+    CHECK(rig.engine.totalTriggers() - before == 1);
+}

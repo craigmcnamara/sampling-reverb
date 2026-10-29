@@ -18,7 +18,8 @@ make validate   # runs Apple's auval against the plugin
 make test       # C++ DSP tests + Swift tests
 ```
 
-In the standalone app, choose **Audio Input** (use headphones) or **Audio File** and play.
+The standalone app starts with the source **Off**. Pick your input and output devices, then choose
+**Input** (use headphones, or speakers away from the mic) or **File** and play.
 
 ## Ableton Live
 

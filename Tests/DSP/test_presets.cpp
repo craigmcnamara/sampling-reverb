@@ -138,3 +138,10 @@ TEST_CASE(presets_night_sky_is_voiced_for_guitar) {
     CHECK(top < 0.f);
     CHECK(nightSky->values[SRParamResonance] == 0.f);  // no hidden resonant peak from the filter
 }
+
+TEST_CASE(presets_leave_the_clock_and_freeze_at_their_defaults) {
+    for (const auto& preset : kPresets)
+        for (const auto& spec : kParamSpecs)
+            if (presetLeavesAlone(spec.address)) CHECK(preset.values[spec.address] == spec.def);
+    CHECK(presetLeavesAlone(SRParamTempo) && presetLeavesAlone(SRParamQuantize) && presetLeavesAlone(SRParamGrid));
+}

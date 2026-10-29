@@ -24,6 +24,15 @@ struct EngineParams {
     int density = 4;
     float focusX = 0.5f, focusY = 0.5f, focusAmount = 0.f;
     bool freeze = false;
+    bool quantize = false;   // hold matched triggers until the next grid point
+    double gridBeats = 0.5;  // grid spacing in quarter-note beats
+};
+
+// The musical position at the start of the current chunk, set by the kernel.
+struct ClockState {
+    double beat = 0.0;            // quarter-note beats
+    double beatsPerFrame = 0.0;   // 0 = no clock
+    double barOrigin = 0.0;       // beat of a bar line; the grid is laid out from here
 };
 
 // Pool samples are stored as half floats: ~66 dB of precision relative to the signal at any level,
@@ -35,6 +44,7 @@ public:
     static constexpr int kSlots = SR_MAX_SLOTS;
     static constexpr int kVoices = 16;    // room for voices still fading out after a Density steal
     static constexpr int kRecorders = 3;  // captures that can record at the same time
+    static constexpr int kPending = 8;    // quantized triggers waiting for their grid point
     static constexpr float kMaxLengthSec = 20.f;
 
     void prepare(float sampleRate) {
@@ -57,6 +67,10 @@ public:
         }
         for (auto& v : voices_) v = Voice {};
         for (auto& r : recorders_) r = Recorder {};
+        for (auto& t : pending_) t = Pending {};
+        pendingCount_ = 0;
+        clock_ = ClockState {};
+        clockFrame_ = 0;
         mono_.assign(window_, 0.f);
         dec_.assign(window_, 0.f);
         acf_.assign(window_, 0.f);
@@ -73,6 +87,12 @@ public:
     }
 
     void setParams(const EngineParams& p) { p_ = p; }
+
+    // Call before each process(): the beat position at the first frame of the coming chunk.
+    void setClock(const ClockState& c) {
+        clock_ = c;
+        clockFrame_ = frame_;
+    }
 
     // Analyzes the input and renders triggered voices into out (which does not include the input).
     void process(const float* inL, const float* inR, float* outL, float* outR, int n) {
@@ -107,6 +127,7 @@ public:
                 analyzing_ = false;
                 handleOnset();
             }
+            if (pendingCount_ > 0) firePending();
 
             float ol = 0.f, orr = 0.f;
             for (auto& v : voices_) {
@@ -212,6 +233,12 @@ private:
         uint64_t start = 0;
     };
 
+    struct Pending {
+        bool active = false;
+        int slot = 0;
+        uint64_t due = 0;  // absolute frame
+    };
+
     // Writes a capture into its slot a sample at a time, so long captures never need a big copy on
     // the audio thread.
     struct Recorder {
@@ -231,6 +258,12 @@ private:
     bool isPlaying(int s) const {
         for (const auto& v : voices_)
             if (v.active && v.slot == s) return true;
+        return isPending(s);
+    }
+
+    bool isPending(int s) const {
+        for (const auto& t : pending_)
+            if (t.active && t.slot == s) return true;
         return false;
     }
 
@@ -331,7 +364,7 @@ private:
         float bestD = 0.03f + 0.57f * p_.match;
         for (int s = 0; s < kSlots; ++s) {
             const Slot& slot = slots_[s];
-            if (!slot.active || frame_ - slot.lastTrigger < retrigGuard) continue;
+            if (!slot.active || frame_ - slot.lastTrigger < retrigGuard || isPending(s)) continue;
             const float d = distance(f, slot.f);
             if (d < bestD) {
                 bestD = d;
@@ -339,7 +372,7 @@ private:
             }
         }
         if (best >= 0) {
-            trigger(best);
+            scheduleTrigger(best);
         } else if (!p_.freeze && !isBeingRecorded(f, 0.03f + 0.57f * p_.match)) {
             startRecording(f);
         }
@@ -432,6 +465,40 @@ private:
         totalCaptures_++;
     }
 
+    // ---- Quantize ---------------------------------------------------------------------------
+
+    // Frames from now to the next grid point (0 when quantize is off or there is no clock).
+    uint64_t framesToGrid() const {
+        if (!p_.quantize || clock_.beatsPerFrame <= 0.0 || p_.gridBeats <= 0.0) return 0;
+        // frame_ has already advanced past the current sample.
+        const double beat = clock_.beat + static_cast<double>(frame_ - 1 - clockFrame_) * clock_.beatsPerFrame;
+        const double rel = (beat - clock_.barOrigin) / p_.gridBeats;
+        const double wait = (std::ceil(rel - 1e-9) - rel) * p_.gridBeats / clock_.beatsPerFrame;
+        return static_cast<uint64_t>(std::llround(wait));
+    }
+
+    void scheduleTrigger(int s) {
+        const uint64_t wait = framesToGrid();
+        if (wait == 0) return trigger(s);
+        for (auto& t : pending_) {
+            if (t.active) continue;
+            t = Pending {true, s, frame_ + wait};
+            slots_[s].lastTrigger = frame_;
+            ++pendingCount_;
+            return;
+        }
+        trigger(s);  // queue full: better early than lost
+    }
+
+    void firePending() {
+        for (auto& t : pending_) {
+            if (!t.active || frame_ < t.due) continue;
+            t.active = false;
+            --pendingCount_;
+            if (slots_[t.slot].active) trigger(t.slot);
+        }
+    }
+
     void trigger(int s) {
         Slot& slot = slots_[s];
         slot.triggerCount++;
@@ -489,6 +556,10 @@ private:
     uint32_t window_ = 2048, preroll_ = 480, maxLen_ = 0;
 
     Recorder recorders_[kRecorders];
+    Pending pending_[kPending];
+    int pendingCount_ = 0;
+    ClockState clock_;
+    uint64_t clockFrame_ = 0;
     std::vector<PoolSample> poolL_, poolR_;
     Slot slots_[kSlots];
     Voice voices_[kVoices];

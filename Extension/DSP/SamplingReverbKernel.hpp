@@ -14,6 +14,24 @@
 
 namespace sr {
 
+// What the host reports at the start of a render block. Any part may be missing.
+struct HostTime {
+    bool hasTempo = false;
+    double tempo = 120.0;
+    bool hasPosition = false;
+    double beat = 0.0;            // quarter notes
+    double downbeat = 0.0;        // beat of the current bar's first beat
+    double barBeats = 4.0;        // quarter notes per bar
+    bool hasTransport = false;
+    bool playing = false;
+};
+
+struct ClockSummary {
+    double tempo = 120.0;
+    double beat = 0.0;
+    bool fromHost = false;
+};
+
 struct VisualSummary {
     int poolCount = 0;
     bool frozen = false;
@@ -37,6 +55,11 @@ public:
     }
     void setBypass(bool bypass) { bypass_.store(bypass, std::memory_order_relaxed); }
 
+    ClockSummary clock() const {
+        return {shownTempo_.load(std::memory_order_relaxed), shownBeat_.load(std::memory_order_relaxed),
+                shownFromHost_.load(std::memory_order_relaxed)};
+    }
+
     // ---- Non-real-time ---------------------------------------------------------------------
 
     void prepare(double sampleRate) {
@@ -51,6 +74,9 @@ public:
         for (auto& v : scopeR_) v = 0.f;
         scopeW_ = 0;
         first_ = true;
+        beat_ = 0.0;
+        barOrigin_ = 0.0;
+        lastHostBeat_ = -1.0;
     }
 
     // ---- UI thread (single consumer) -------------------------------------------------------
@@ -66,8 +92,12 @@ public:
 
     // ---- Real-time -------------------------------------------------------------------------
 
+    // Call before process() with what the host reported for this block.
+    void setHostTime(const HostTime& t) { host_ = t; }
+
     // In-place safe: outL/outR may alias inL/inR, and inL may equal inR (mono).
     void process(const float* inL, const float* inR, float* outL, float* outR, int frames) {
+        beginClock();
         if (bypass_.load(std::memory_order_relaxed)) {
             if (outL != inL) std::memmove(outL, inL, sizeof(float) * frames);
             if (outR != inR) std::memmove(outR, inR, sizeof(float) * frames);
@@ -75,7 +105,9 @@ public:
         }
         for (int done = 0; done < frames;) {
             const int n = std::min(kChunk, frames - done);
+            engine_.setClock({beat_, beatsPerFrame_, barOrigin_});
             processChunk(inL + done, inR + done, outL + done, outR + done, n);
+            beat_ += n * beatsPerFrame_;
             done += n;
         }
         publishVisual();
@@ -103,6 +135,28 @@ private:
     };
 
     float p(SRParam a) const { return params_[a].load(std::memory_order_relaxed); }
+
+    // While the host's transport plays, follow its position. Otherwise run free at the host's tempo,
+    // or at the Tempo parameter when there is no host tempo (the standalone app).
+    void beginClock() {
+        const bool fromHost = host_.hasTempo && host_.tempo > 0.0;
+        const double tempo = std::min(std::max(fromHost ? host_.tempo : static_cast<double>(p(SRParamTempo)), 20.0), 400.0);
+        beatsPerFrame_ = tempo / (60.0 * sr_);
+        barBeats_ = host_.hasPosition && host_.barBeats > 0.0 ? host_.barBeats : 4.0;
+        // Without transport state, the position only counts as playing while it moves.
+        const bool playing = host_.hasPosition &&
+                             (host_.hasTransport ? host_.playing : host_.beat != lastHostBeat_);
+        lastHostBeat_ = host_.hasPosition ? host_.beat : -1.0;
+        if (playing) {
+            beat_ = host_.beat;
+            barOrigin_ = host_.downbeat;
+        }
+        const int grid = std::min(std::max(static_cast<int>(std::lround(p(SRParamGrid))), 0), kGridCount - 1);
+        gridBeats_ = kGridBeats[grid] > 0.0 ? kGridBeats[grid] : barBeats_;
+        shownTempo_.store(tempo, std::memory_order_relaxed);
+        shownBeat_.store(beat_ - barOrigin_, std::memory_order_relaxed);
+        shownFromHost_.store(fromHost, std::memory_order_relaxed);
+    }
 
     void processChunk(const float* inL, const float* inR, float* outL, float* outR, int n) {
         const bool freeze = p(SRParamFreeze) >= 0.5f;
@@ -143,6 +197,8 @@ private:
         ep.focusY = p(SRParamFocusY);
         ep.focusAmount = p(SRParamFocusAmount) / 100.f;
         ep.freeze = freeze;
+        ep.quantize = p(SRParamQuantize) >= 0.5f;
+        ep.gridBeats = gridBeats_;
         engine_.setParams(ep);
 
         FDNReverb::Params rp;
@@ -230,6 +286,12 @@ private:
     bool frozen_ = false;
     Smoothed mix_, level_, dry_, filter_, size_;
     float preCur_ = 0.f;
+
+    HostTime host_;
+    double beat_ = 0.0, beatsPerFrame_ = 0.0, barOrigin_ = 0.0, barBeats_ = 4.0, gridBeats_ = 0.5;
+    double lastHostBeat_ = -1.0;
+    std::atomic<double> shownTempo_ {120.0}, shownBeat_ {0.0};
+    std::atomic<bool> shownFromHost_ {false};
 
     SampleEngine engine_;
     FDNReverb reverb_;

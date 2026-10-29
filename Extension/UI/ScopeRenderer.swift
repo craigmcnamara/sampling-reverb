@@ -178,6 +178,7 @@ final class ScopeRenderer: NSObject, MTKViewDelegate {
         }
         if model.poolCount != pool { model.poolCount = pool }
         if model.frozen != frozen.boolValue { model.frozen = frozen.boolValue }
+        model.refreshClock()
     }
 
     private func buildGeometry(dt: Float, pixelScale: Float) {

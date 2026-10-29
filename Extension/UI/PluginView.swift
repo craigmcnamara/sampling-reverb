@@ -9,7 +9,18 @@ struct PluginView: View {
         VStack(spacing: 12) {
             header
             HStack(alignment: .top, spacing: 12) {
-                ScopeView(model: model)
+                ScopeView(model: model, paused: model.scopeFullScreen)
+                    .overlay {
+                        if model.scopeFullScreen {
+                            Text("FULL SCREEN · ESC TO RETURN")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .tracking(2)
+                                .foregroundStyle(Theme.label)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color.black)
+                                .onTapGesture(count: 2) { model.scopeFullScreen = false }
+                        }
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(white: 0.18), lineWidth: 1))
                 samplerPanel
@@ -29,6 +40,8 @@ struct PluginView: View {
                 .tracking(3)
                 .foregroundStyle(Theme.accent)
             Spacer()
+            ClockStrip(model: model, clock: model.clock)
+            Spacer().frame(width: 14)
             Text("POOL \(model.poolCount)/\(Int(SR_MAX_SLOTS))")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(Theme.label)
@@ -37,6 +50,15 @@ struct PluginView: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(Theme.accent)
             }
+            Button { model.scopeFullScreen.toggle() } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.label)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Full-screen scope (or double-click the scope)")
         }
     }
 
