@@ -4,18 +4,18 @@ DERIVED      := build/DerivedData
 APP          := $(DERIVED)/Build/Products/$(CONFIG)/Sampling Reverb.app
 INSTALL_DIR  ?= /Applications
 
-CXX          ?= clang++
-DSP_FLAGS    := -std=c++17 -O2 -Wall -Wextra -IExtension/DSP -ITests/DSP
-DSP_TEST_BIN := build/dsp_tests
 
-.PHONY: all project app install validate run test test-dsp test-swift clean
+.PHONY: all project rust app install validate run test test-rust test-swift clean
 
 all: app
 
 project:
 	xcodegen generate --quiet
 
-app: project
+rust:
+	tools/build-rust.sh
+
+app: project rust
 	xcodebuild -project $(PROJECT) -scheme SamplingReverb -configuration $(CONFIG) \
 		-derivedDataPath $(DERIVED) -quiet build
 
@@ -33,14 +33,11 @@ validate:
 run: app
 	open "$(APP)"
 
-test: test-dsp test-swift
+test: test-rust test-swift
 
-test-dsp: $(DSP_TEST_BIN)
-	./$(DSP_TEST_BIN)
-
-$(DSP_TEST_BIN): $(wildcard Extension/DSP/*) $(wildcard Tests/DSP/*)
-	mkdir -p build
-	$(CXX) $(DSP_FLAGS) Tests/DSP/*.cpp -o $@
+# The Rust DSP core's tests.
+test-rust:
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --quiet --release --manifest-path dsp/Cargo.toml --target $(shell uname -m | sed s/arm64/aarch64/)-apple-darwin
 
 test-swift: project
 	xcodebuild -project $(PROJECT) -scheme SamplingReverb -derivedDataPath $(DERIVED) -quiet test

@@ -20,7 +20,7 @@ The controls are inspired by the Strymon NightSky.
 | Plugin format      | AUv3 app extension (`aufx` effect), macOS 13+                  |
 | Standalone         | The containing SwiftUI app hosts the same AU via AVAudioEngine |
 | Ableton            | Live finds the AU through the system Audio Unit registry      |
-| DSP                | C++17, header-only, real-time safe (no allocation/locks in render) |
+| DSP                | Rust (`dsp/`), real-time safe (no allocation/locks in render), linked as a universal static library through a C ABI |
 | AU class           | Thin Objective-C++ `AUAudioUnit` subclass (owns the render block) |
 | UI                 | SwiftUI (controls) + Metal (`MTKView`) for scope, particles, bloom |
 | Project generation | XcodeGen (`project.yml`). The `.xcodeproj` is generated, not committed |
@@ -28,8 +28,23 @@ The controls are inspired by the Strymon NightSky.
 
 **Why Objective-C++ for the AU class?** The render block runs on the real-time audio
 thread. Swift can't guarantee it won't allocate memory or take locks there, so the block
-is built in Objective-C++ and calls straight into the C++ kernel. Everything that isn't
+is built in Objective-C++ and calls straight into the DSP kernel. Everything that isn't
 real-time (UI, hosting, parameter observation) is Swift.
+
+**Why Rust for the DSP?** Memory safety on the audio thread: every buffer access is
+bounds-checked or masked, the kernel's thread roles are encoded in its types (atomics for
+parameters, an `UnsafeCell` touched only by the render call, a single-producer/single-consumer
+triple buffer for visuals), and the few `unsafe` blocks are confined to the C ABI and those
+documented hand-offs. A panic aborts the extension rather than corrupting memory (Live
+reports the plugin as disconnected). It replaced an earlier C++ kernel bit for bit; see §11.
+
+**The C ABI** (`dsp/include/sr_dsp.h`, `dsp/src/ffi.rs`): the AU creates a kernel with
+`sr_kernel_new`, prepares it in `allocateRenderResources`, calls `sr_kernel_process` from the
+render block, and reads visuals and the clock from the UI. Parameter specs, value names and
+presets also come from Rust, so the parameter table has one source of truth. Every entry point
+tolerates a null kernel and out-of-range indexes. Host buffers may alias (in-place processing,
+mono input), so the kernel never forms a Rust slice over them: each 256-frame chunk is copied in
+before any output is written.
 
 **Process model.** On macOS an AUv3 runs in its extension process. The AU instance and
 its view controller live in that process, so the Metal view reads visualization state
@@ -262,7 +277,7 @@ they near discard.
 New parameters are always added at the end, so the addresses in saved Live sets stay valid.
 
 ### Factory presets
-There are seven AU factory presets, defined in `Extension/DSP/Presets.hpp`. They appear as the
+There are seven AU factory presets, defined in `dsp/src/params.rs`. They appear as the
 bottom toolbar in the plugin UI and in the host's preset menu.
 
 - **Default** is always first. It's built from the parameter table at compile time, so it
@@ -389,9 +404,10 @@ slot's trigger counter changes.
 ## 9. Real-time safety rules
 - All buffers (input history ring, 24 slots × 20 s × stereo half floats, delay lines) are
   allocated in `allocateRenderResources`, sized for the current sample rate.
-- The render path has no `new`, `malloc`, locks, Objective-C messaging or Swift.
-- Parameter changes reach the kernel through relaxed `std::atomic<float>` values, set
-  from the parameter tree's `implementorValueObserver`.
+- The render path has no heap allocation, locks, Objective-C messaging or Swift. A test runs
+  the Rust kernel under a counting global allocator and fails if `process` allocates at all.
+- Parameter changes reach the kernel through relaxed atomic floats, set from the parameter
+  tree's `implementorValueObserver`.
 - Visualization is published through a single-producer/single-consumer triple buffer.
 
 ---
@@ -403,10 +419,13 @@ project.yml                 XcodeGen spec (app + AUv3 extension)
 App/                        Standalone SwiftUI host app
 Extension/                  AUv3 extension
   AU/                       ObjC++ AUAudioUnit subclass + bridging header
-  DSP/                      Header-only C++ DSP (kernel, reverb, pool, analyzer…)
+  DSP/                      Shared C headers (ParamIDs.h, VisualTypes.h)
   UI/                       SwiftUI controls, Metal scope renderer, shaders
   UI/Logic/                 Pure-Swift UI logic (mapping, plot space, particles, slot events)
-Tests/DSP/                  C++ DSP tests (dependency-free harness, `make test-dsp`)
+dsp/                        Rust DSP core (kernel, reverb, pool, analyzer…) and its C ABI
+  include/sr_dsp.h          C header for the AU
+  tests/                    Rust tests (`make test-rust`)
+tools/build-rust.sh         Builds the universal static library (run by make and Xcode)
 Tests/Swift/                Swift Testing suites for UI/Logic (`make test-swift`)
 docs/design.md              This document
 ```
@@ -417,28 +436,32 @@ docs/design.md              This document
 
 Tests are written first wherever it's practical.
 
-- **C++ DSP** (`Tests/DSP`, about 90 cases). This is a tiny built-in harness, built with
-  clang and with no dependencies. It covers:
-  - the building blocks (delay lines, allpass energy, the SVF, the triple buffer under
-    concurrency)
-  - pitch-shifter accuracy, RT60 tracking, freeze and stability under extreme settings
-  - engine behaviour: pitch and brightness analysis, capture, matching, Harmony, Focus,
-    Retention and life extension, pool replacement, Freeze and Density
-  - kernel contracts: bypass and dry are bit-exact, in-place processing, any block size,
-    sample rates from 44.1 to 192 kHz, and random-parameter abuse
-  - Shimmer and Sub regressions: no runaway (at most +6 dB) for every interval with stereo
-    and left-only input, balanced wet output for left-only input, and the shifted pitch
-    clearly present when on and absent when off
-  - presets: Default matches the parameter defaults, every value is within range, presets
-    are distinct, every preset rings stably with real input, and presets leave the clock alone
-  - quantize: triggers land exactly on the grid (straight and triplet, from the bar origin), a
-    waiting slot isn't queued twice, the kernel follows a playing host, runs free at the host
-    tempo when stopped, runs at the Tempo parameter without a host, and 1 bar follows the host
-    time signature
-  - sync: synced Pre-delay delays the wet output by exactly the division at the tempo
-    (including dotted and triplet values, and past the free knob's 500 ms), Sync off keeps the
-    free Pre-delay, and synced Length captures whole beats and bars in the host time signature,
-    capped at 20 s
+- **Rust DSP** (`dsp/tests`, `make test-rust`, about 95 cases), one file per area:
+  - `building_blocks`: delay lines, allpass energy, the SVF, half floats over every bit
+    pattern, and the triple buffer (latest-value semantics, no tearing under concurrency)
+  - `reverb`: pitch-shifter accuracy, decorrelated stereo tail, RT60 tracking, freeze, and
+    stability under extreme settings
+  - `engine`: pitch and brightness analysis, map position, capture, Sensitivity, matching,
+    Harmony, Match, Focus, Retention and life extension, pool replacement, Freeze, Density,
+    visuals, Attack, long captures, click-free fades, gentle voice steals, and quantize
+    (exact grid points, triplets, bar origin, no double-queuing)
+  - `kernel`: bypass and dry are bit-exact, routing (Dry Feed, Sample Level), in-place and
+    mono-in-place processing at any block size, sample rates from 44.1 to 192 kHz, random and
+    out-of-range parameters with wild host times; Shimmer and Sub regressions (no runaway above
+    +6 dB for every interval with stereo and left-only input, balanced wet output, the shifted
+    pitch present when on and absent when off, the guitar body kept, the undertone series
+    present); the host and free-running clocks, stopped transport and time signatures; synced
+    Pre-delay and Length
+  - `presets`: names, ranges, Default matches the parameter defaults, presets are distinct,
+    ring stably with real input, leave the clock alone, and Night Sky's guitar voicing
+  - `ffi`: the C ABI's metadata, null pointers and bad indexes
+  - `no_alloc`: a counting global allocator fails the test if `process` allocates at all,
+    across every preset, Sync, Quantize, host-clock state and block size
+- The Rust core began as a line-for-line port of an earlier C++17 kernel. Before the C++ was
+  removed, a parity harness ran both side by side on about 4.5 minutes of audio (44.1–96 kHz,
+  random block sizes, in place, mono, host and free-running clocks, with presets, Sync,
+  Quantize and fractional tempos changing constantly) and confirmed bit-identical output,
+  triggers, captures, visuals and clock. The C++ tests were ported case by case.
 - **Swift** (`Tests/Swift`, Swift Testing). The UI logic that doesn't depend on AppKit or
   Metal lives in `Extension/UI/Logic` and is compiled straight into a hostless test bundle.
   Those tests cover parameter mapping, plot coordinates, the particle system (including
@@ -453,4 +476,4 @@ Tests are written first wherever it's practical.
 - Reverse and half-speed voice playback modes (NightSky-style "Texture" variants).
 - A NightSky-style step sequencer that modulates Filter.
 - MIDI input to trigger slots directly.
-- A CLAP/VST3 wrapper around the same C++ DSP core.
+- A CLAP/VST3 wrapper around the same Rust DSP core.

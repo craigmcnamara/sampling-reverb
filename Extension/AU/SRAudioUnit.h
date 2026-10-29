@@ -5,7 +5,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// The Sampling Reverb AUAudioUnit. The render path lives in C++ (see SamplingReverbKernel.hpp).
+/// The Sampling Reverb AUAudioUnit. The render path lives in the Rust DSP core (see dsp/include/sr_dsp.h).
 @interface SRAudioUnit : AUAudioUnit
 
 /// Copies the latest visual snapshot published by the audio thread. Call from the main thread only.

@@ -11,13 +11,15 @@ See [docs/design.md](docs/design.md) for how it works.
 - macOS 13+ and Xcode 26+
 - `brew install xcodegen`
 - `xcodebuild -downloadComponent MetalToolchain` (one-time; Xcode's Metal shader compiler)
+- Rust from [rustup.rs](https://rustup.rs), with both Mac targets:
+  `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
 
 ## Build and run
 
 ```sh
 make install    # builds, copies to /Applications, registers the AU and launches the app
 make validate   # runs Apple's auval against the plugin
-make test       # C++ DSP tests + Swift tests
+make test       # Rust DSP tests + Swift tests
 ```
 
 The standalone app starts with the source **Off**. Pick your input and output devices, then choose
