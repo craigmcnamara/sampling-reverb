@@ -5,16 +5,15 @@
 #include <memory>
 #include <vector>
 
-#include "ParamInfo.hpp"
-#include "Presets.hpp"
-#include "SamplingReverbKernel.hpp"
+#include "sr_dsp.h"
 
 namespace {
 
 // Everything the render block touches, owned by the AU and captured by raw pointer
 // so the block never retains (or messages) the Objective-C object.
 struct RenderState {
-    sr::Kernel kernel;
+    // The Rust DSP core (dsp/), through its C ABI.
+    SRKernel* const kernel = sr_kernel_new();
     std::vector<float> inL, inR, scratchR;
     AudioBufferList* inputList = nullptr;
     AUAudioFrameCount maxFrames = 0;
@@ -22,8 +21,8 @@ struct RenderState {
     AUHostMusicalContextBlock musicalContext = nil;
     AUHostTransportStateBlock transportState = nil;
 
-    sr::HostTime hostTime() const {
-        sr::HostTime t;
+    SRHostTime hostTime() const {
+        SRHostTime t = {false, 120.0, false, 0.0, 0.0, 4.0, false, false};
         if (musicalContext) {
             double tempo = 0, numerator = 4, beat = 0, downbeat = 0;
             NSInteger denominator = 4, offsetToNextBeat = 0;
@@ -47,7 +46,10 @@ struct RenderState {
         return t;
     }
 
-    ~RenderState() { free(inputList); }
+    ~RenderState() {
+        free(inputList);
+        sr_kernel_free(kernel);
+    }
 
     void allocate(AUAudioFrameCount frames) {
         maxFrames = frames;
@@ -70,16 +72,16 @@ struct RenderState {
     }
 };
 
-AudioUnitParameterUnit unitFor(sr::Unit unit) {
+AudioUnitParameterUnit unitFor(uint32_t unit) {
     switch (unit) {
-        case sr::Unit::Percent: return kAudioUnitParameterUnit_Percent;
-        case sr::Unit::Seconds: return kAudioUnitParameterUnit_Seconds;
-        case sr::Unit::Milliseconds: return kAudioUnitParameterUnit_Milliseconds;
-        case sr::Unit::Decibels: return kAudioUnitParameterUnit_Decibels;
-        case sr::Unit::Indexed: return kAudioUnitParameterUnit_Indexed;
-        case sr::Unit::Boolean: return kAudioUnitParameterUnit_Boolean;
-        case sr::Unit::Bpm: return kAudioUnitParameterUnit_BPM;
-        case sr::Unit::Generic: return kAudioUnitParameterUnit_Generic;
+        case SRUnitPercent: return kAudioUnitParameterUnit_Percent;
+        case SRUnitSeconds: return kAudioUnitParameterUnit_Seconds;
+        case SRUnitMilliseconds: return kAudioUnitParameterUnit_Milliseconds;
+        case SRUnitDecibels: return kAudioUnitParameterUnit_Decibels;
+        case SRUnitIndexed: return kAudioUnitParameterUnit_Indexed;
+        case SRUnitBoolean: return kAudioUnitParameterUnit_Boolean;
+        case SRUnitBpm: return kAudioUnitParameterUnit_BPM;
+        case SRUnitGeneric: return kAudioUnitParameterUnit_Generic;
     }
     return kAudioUnitParameterUnit_Generic;
 }
@@ -122,25 +124,19 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 
 - (void)buildParameterTree {
     NSMutableArray<AUParameter*>* params = [NSMutableArray array];
-    for (const auto& spec : sr::kParamSpecs) {
+    for (uint64_t address = 0; address < SRParamCount; ++address) {
+        const SRParamSpec spec = sr_param_spec(address);
         NSArray<NSString*>* valueStrings = nil;
-        auto names = [](const char* const* list, int count) {
+        if (const int32_t count = sr_param_value_name_count(address)) {
             NSMutableArray* names = [NSMutableArray array];
-            for (int i = 0; i < count; ++i) [names addObject:@(list[i])];
-            return names;
-        };
-        switch (spec.address) {
-            case SRParamInterval: valueStrings = names(sr::kIntervalNames, sr::kIntervalCount); break;
-            case SRParamGrid: valueStrings = names(sr::kGridNames, sr::kGridCount); break;
-            case SRParamPreDelayDiv: valueStrings = names(sr::kPreDelayDivNames, sr::kPreDelayDivCount); break;
-            case SRParamLengthDiv: valueStrings = names(sr::kLengthDivNames, sr::kLengthDivCount); break;
-            default: break;
+            for (int32_t i = 0; i < count; ++i) [names addObject:@(sr_param_value_name(address, i))];
+            valueStrings = names;
         }
         AudioUnitParameterOptions flags = kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable;
         if (spec.exponential) flags |= kAudioUnitParameterFlag_DisplayExponential;
         AUParameter* param = [AUParameterTree createParameterWithIdentifier:@(spec.identifier)
                                                                        name:@(spec.name)
-                                                                    address:spec.address
+                                                                    address:address
                                                                         min:spec.min
                                                                         max:spec.max
                                                                        unit:unitFor(spec.unit)
@@ -153,12 +149,12 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
     }
     _parameterTree = [AUParameterTree createTreeWithChildren:params];
 
-    sr::Kernel* kernel = &_state->kernel;
+    SRKernel* kernel = _state->kernel;
     _parameterTree.implementorValueObserver = ^(AUParameter* param, AUValue value) {
-        kernel->setParameter(param.address, value);
+        sr_kernel_set_parameter(kernel, param.address, value);
     };
     _parameterTree.implementorValueProvider = ^AUValue(AUParameter* param) {
-        return kernel->getParameter(param.address);
+        return sr_kernel_get_parameter(kernel, param.address);
     };
     _parameterTree.implementorStringFromValueCallback = ^NSString*(AUParameter* param, const AUValue* valuePtr) {
         const AUValue value = valuePtr ? *valuePtr : param.value;
@@ -186,10 +182,10 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 
 - (void)buildFactoryPresets {
     NSMutableArray<AUAudioUnitPreset*>* presets = [NSMutableArray array];
-    for (int i = 0; i < sr::kPresetCount; ++i) {
+    for (int32_t i = 0; i < sr_preset_count(); ++i) {
         AUAudioUnitPreset* preset = [AUAudioUnitPreset new];
         preset.number = i;
-        preset.name = @(sr::kPresets[i].name);
+        preset.name = @(sr_preset_name(i));
         [presets addObject:preset];
     }
     _factoryPresets = presets;
@@ -202,12 +198,13 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 - (AUAudioUnitPreset*)currentPreset { return _currentPreset; }
 
 - (void)setCurrentPreset:(AUAudioUnitPreset*)preset {
-    if (preset && preset.number >= 0 && preset.number < sr::kPresetCount) {
+    if (preset && preset.number >= 0 && preset.number < sr_preset_count()) {
         // Setting values through the tree notifies the kernel, the UI and the host (automation).
         // Freeze and the clock are performance controls, so presets leave them alone.
-        const auto& values = sr::kPresets[preset.number].values;
+        const int32_t index = (int32_t)preset.number;
         for (AUParameter* param in _parameterTree.allParameters) {
-            if (param.address < SRParamCount && !sr::presetLeavesAlone(param.address)) param.value = values[param.address];
+            if (param.address < SRParamCount && !sr_preset_leaves_alone(param.address))
+                param.value = sr_preset_value(index, param.address);
         }
         _currentPreset = _factoryPresets[preset.number];
     } else {
@@ -216,9 +213,9 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 }
 
 - (NSDictionary<NSNumber*, NSNumber*>*)valuesForFactoryPresetAtIndex:(NSInteger)index {
-    if (index < 0 || index >= sr::kPresetCount) return @{};
+    if (index < 0 || index >= sr_preset_count()) return @{};
     NSMutableDictionary* values = [NSMutableDictionary dictionary];
-    for (uint64_t p = 0; p < SRParamCount; ++p) values[@(p)] = @(sr::kPresets[index].values[p]);
+    for (uint64_t p = 0; p < SRParamCount; ++p) values[@(p)] = @(sr_preset_value((int32_t)index, p));
     return values;
 }
 
@@ -233,7 +230,7 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 
 - (void)setShouldBypassEffect:(BOOL)shouldBypassEffect {
     [super setShouldBypassEffect:shouldBypassEffect];
-    _state->kernel.setBypass(shouldBypassEffect);
+    sr_kernel_set_bypass(_state->kernel, shouldBypassEffect);
 }
 
 - (BOOL)allocateRenderResourcesAndReturnError:(NSError**)outError {
@@ -246,7 +243,7 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
     _state->allocate(self.maximumFramesToRender);
     _state->musicalContext = self.musicalContextBlock;
     _state->transportState = self.transportStateBlock;
-    _state->kernel.prepare(_outputBus.format.sampleRate);
+    sr_kernel_prepare(_state->kernel, _outputBus.format.sampleRate);
     return YES;
 }
 
@@ -262,7 +259,7 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 
         for (const AURenderEvent* e = realtimeEventListHead; e; e = e->head.next) {
             if (e->head.eventType == AURenderEventParameter || e->head.eventType == AURenderEventParameterRamp)
-                state->kernel.setParameter(e->parameter.parameterAddress, e->parameter.value);
+                sr_kernel_set_parameter(state->kernel, e->parameter.parameterAddress, e->parameter.value);
         }
 
         const UInt32 channels = MIN(outputData->mNumberBuffers, 2u);
@@ -279,8 +276,8 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
         const float* inR = channels > 1 ? static_cast<const float*>(input->mBuffers[1].mData) : inL;
         float* outL = static_cast<float*>(outputData->mBuffers[0].mData);
         float* outR = channels > 1 ? static_cast<float*>(outputData->mBuffers[1].mData) : state->scratchR.data();
-        state->kernel.setHostTime(state->hostTime());
-        state->kernel.process(inL, inR, outL, outR, static_cast<int>(frameCount));
+        const SRHostTime host = state->hostTime();
+        sr_kernel_process(state->kernel, &host, inL, inR, outL, outR, static_cast<int32_t>(frameCount));
         return noErr;
     };
 }
@@ -288,7 +285,7 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
 #pragma mark - Visuals
 
 - (double)currentTempoFromHost:(BOOL*)fromHost beatInBar:(double*)beatInBar {
-    const sr::ClockSummary clock = _state->kernel.clock();
+    const SRClockSummary clock = sr_kernel_clock(_state->kernel);
     if (fromHost) *fromHost = clock.fromHost;
     if (beatInBar) *beatInBar = clock.beat;
     return clock.tempo;
@@ -300,10 +297,11 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
                   scopeRight:(float*)scopeRight
                   scopeCount:(NSInteger)scopeCount
                       frozen:(BOOL*)frozen {
-    const sr::VisualSummary summary =
-        _state->kernel.readVisual(slots, (int)slotCount, scopeLeft, scopeRight, (int)scopeCount);
-    if (frozen) *frozen = summary.frozen;
-    return summary.poolCount;
+    bool isFrozen = false;
+    const int32_t pool = sr_kernel_read_visual(_state->kernel, slots, (int32_t)slotCount, scopeLeft, scopeRight,
+                                               (int32_t)scopeCount, &isFrozen);
+    if (frozen) *frozen = isFrozen;
+    return pool;
 }
 
 @end

@@ -8,14 +8,17 @@ CXX          ?= clang++
 DSP_FLAGS    := -std=c++17 -O2 -Wall -Wextra -IExtension/DSP -ITests/DSP
 DSP_TEST_BIN := build/dsp_tests
 
-.PHONY: all project app install validate run test test-dsp test-swift clean
+.PHONY: all project rust app install validate run test test-dsp test-rust test-parity test-swift clean
 
 all: app
 
 project:
 	xcodegen generate --quiet
 
-app: project
+rust:
+	tools/build-rust.sh
+
+app: project rust
 	xcodebuild -project $(PROJECT) -scheme SamplingReverb -configuration $(CONFIG) \
 		-derivedDataPath $(DERIVED) -quiet build
 
@@ -33,7 +36,18 @@ validate:
 run: app
 	open "$(APP)"
 
-test: test-dsp test-swift
+test: test-dsp test-rust test-parity test-swift
+
+# The Rust DSP core's own tests (on the host architecture).
+test-rust:
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --quiet --release --manifest-path dsp/Cargo.toml --target aarch64-apple-darwin
+
+# The Rust core against the C++ reference: bit-identical output.
+PARITY_BIN := build/parity
+test-parity: rust
+	$(CXX) -std=c++17 -O2 -ffp-contract=off -Wall -IExtension/DSP -ITests/DSP -Idsp/include \
+		Tests/Parity/parity.cpp build/rust/libsampling_reverb_dsp.a -o $(PARITY_BIN)
+	./$(PARITY_BIN)
 
 test-dsp: $(DSP_TEST_BIN)
 	./$(DSP_TEST_BIN)

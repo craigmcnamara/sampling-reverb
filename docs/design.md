@@ -20,7 +20,7 @@ The controls are inspired by the Strymon NightSky.
 | Plugin format      | AUv3 app extension (`aufx` effect), macOS 13+                  |
 | Standalone         | The containing SwiftUI app hosts the same AU via AVAudioEngine |
 | Ableton            | Live finds the AU through the system Audio Unit registry      |
-| DSP                | C++17, header-only, real-time safe (no allocation/locks in render) |
+| DSP                | Rust (`dsp/`), real-time safe (no allocation/locks in render), linked as a universal static library through a C ABI. The original C++17 kernel (`Extension/DSP`) is kept as the reference it's tested against |
 | AU class           | Thin Objective-C++ `AUAudioUnit` subclass (owns the render block) |
 | UI                 | SwiftUI (controls) + Metal (`MTKView`) for scope, particles, bloom |
 | Project generation | XcodeGen (`project.yml`). The `.xcodeproj` is generated, not committed |
@@ -28,8 +28,23 @@ The controls are inspired by the Strymon NightSky.
 
 **Why Objective-C++ for the AU class?** The render block runs on the real-time audio
 thread. Swift can't guarantee it won't allocate memory or take locks there, so the block
-is built in Objective-C++ and calls straight into the C++ kernel. Everything that isn't
+is built in Objective-C++ and calls straight into the DSP kernel. Everything that isn't
 real-time (UI, hosting, parameter observation) is Swift.
+
+**Why Rust for the DSP?** Memory safety on the audio thread: every buffer access is
+bounds-checked or masked, the kernel's thread roles are encoded in its types (atomics for
+parameters, an `UnsafeCell` touched only by the render call, a single-producer/single-consumer
+triple buffer for visuals), and the few `unsafe` blocks are confined to the C ABI and those
+documented hand-offs. A panic aborts the extension rather than corrupting memory (Live
+reports the plugin as disconnected). The port is bit-identical to the C++ kernel; see §11.
+
+**The C ABI** (`dsp/include/sr_dsp.h`, `dsp/src/ffi.rs`): the AU creates a kernel with
+`sr_kernel_new`, prepares it in `allocateRenderResources`, calls `sr_kernel_process` from the
+render block, and reads visuals and the clock from the UI. Parameter specs, value names and
+presets also come from Rust, so the parameter table has one source of truth. Every entry point
+tolerates a null kernel and out-of-range indexes. Host buffers may alias (in-place processing,
+mono input), so the kernel never forms a Rust slice over them: each 256-frame chunk is copied in
+before any output is written.
 
 **Process model.** On macOS an AUv3 runs in its extension process. The AU instance and
 its view controller live in that process, so the Metal view reads visualization state
@@ -389,9 +404,10 @@ slot's trigger counter changes.
 ## 9. Real-time safety rules
 - All buffers (input history ring, 24 slots × 20 s × stereo half floats, delay lines) are
   allocated in `allocateRenderResources`, sized for the current sample rate.
-- The render path has no `new`, `malloc`, locks, Objective-C messaging or Swift.
-- Parameter changes reach the kernel through relaxed `std::atomic<float>` values, set
-  from the parameter tree's `implementorValueObserver`.
+- The render path has no heap allocation, locks, Objective-C messaging or Swift. A test runs
+  the Rust kernel under a counting global allocator and fails if `process` allocates at all.
+- Parameter changes reach the kernel through relaxed atomic floats, set from the parameter
+  tree's `implementorValueObserver`.
 - Visualization is published through a single-producer/single-consumer triple buffer.
 
 ---
@@ -403,10 +419,15 @@ project.yml                 XcodeGen spec (app + AUv3 extension)
 App/                        Standalone SwiftUI host app
 Extension/                  AUv3 extension
   AU/                       ObjC++ AUAudioUnit subclass + bridging header
-  DSP/                      Header-only C++ DSP (kernel, reverb, pool, analyzer…)
+  DSP/                      Shared C headers (ParamIDs.h, VisualTypes.h) and the C++ reference DSP
   UI/                       SwiftUI controls, Metal scope renderer, shaders
   UI/Logic/                 Pure-Swift UI logic (mapping, plot space, particles, slot events)
-Tests/DSP/                  C++ DSP tests (dependency-free harness, `make test-dsp`)
+dsp/                        Rust DSP core (kernel, reverb, pool, analyzer…) and its C ABI
+  include/sr_dsp.h          C header for the AU
+  tests/                    Rust tests (`make test-rust`)
+tools/build-rust.sh         Builds the universal static library (run by make and Xcode)
+Tests/DSP/                  C++ reference tests (dependency-free harness, `make test-dsp`)
+Tests/Parity/               C++ reference vs Rust, bit for bit (`make test-parity`)
 Tests/Swift/                Swift Testing suites for UI/Logic (`make test-swift`)
 docs/design.md              This document
 ```
@@ -417,7 +438,21 @@ docs/design.md              This document
 
 Tests are written first wherever it's practical.
 
-- **C++ DSP** (`Tests/DSP`, about 90 cases). This is a tiny built-in harness, built with
+- **Rust DSP** (`dsp/tests`, `make test-rust`): the building blocks (delay lines, allpass
+  energy, the SVF, half floats over every bit pattern, the triple buffer under concurrency),
+  reverb tail, freeze and stability with full Shimmer and Sub, engine pitch analysis, capture,
+  matching, Harmony, Retention, Density and quantize, kernel bypass, in-place and mono-in-place
+  processing at any block size, every common sample rate, random-parameter abuse, synced
+  Pre-delay, host-transport quantize, presets, a null-safe C ABI, and **no allocation in
+  `process`**.
+- **Parity** (`Tests/Parity`, `make test-parity`): runs the C++ reference and the Rust kernel
+  side by side on about 4.5 minutes of audio across 44.1–96 kHz, random block sizes, in place,
+  mono, host clock and free-running, with presets, Sync, Quantize, Freeze, Filter and fractional
+  tempos changing every fraction of a second, and requires **bit-identical** output, triggers,
+  captures, visuals and clock. It also checks every parameter spec, preset and value name, and
+  that half-float rounding matches `_Float16` across a sweep of the float range. (The C++ side
+  is built with `-ffp-contract=off`, because Rust never fuses multiply-adds.)
+- **C++ reference** (`Tests/DSP`, about 90 cases). This is a tiny built-in harness, built with
   clang and with no dependencies. It covers:
   - the building blocks (delay lines, allpass energy, the SVF, the triple buffer under
     concurrency)
