@@ -79,10 +79,6 @@ const char *sr_preset_name(int32_t index);
 float sr_preset_value(int32_t index, uint64_t address);
 bool sr_preset_leaves_alone(uint64_t address);
 
-// Test hooks.
-void sr_kernel_debug_counts(const SRKernel *k, uint64_t *triggers, uint64_t *captures);
-float sr_debug_f16_round_trip(float x);
-
 #ifdef __cplusplus
 }
 #endif

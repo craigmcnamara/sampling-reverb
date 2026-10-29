@@ -1,7 +1,4 @@
 //! Small real-time-safe DSP building blocks.
-//!
-//! The arithmetic mirrors the original C++ operation by operation (same order, same `f32`
-//! library calls) so the two implementations produce bit-identical output; see `make test-parity`.
 
 pub const PI: f32 = 3.14159265358979;
 pub const TWO_PI: f32 = 2.0 * PI;

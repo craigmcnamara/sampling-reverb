@@ -1,6 +1,6 @@
-//! Test signal generators and measurements (a port of Tests/DSP/Signals.hpp).
+//! Test signal generators and measurements.
 #![allow(dead_code)]
-// The generators copy the C++ test signals, including their π literal.
+// The generators keep the original test signals exactly, including their π literal.
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
 use sampling_reverb_dsp::util::Svf;
@@ -163,4 +163,17 @@ pub fn band_energy_db(x: &[f32], from: usize, lo: f32, hi: f32, sr: f32) -> f32 
         }
     }
     (10.0 * (e + 1e-20).log10()) as f32
+}
+
+/// `assert!((a - b).abs() <= tol)` with the values in the message.
+#[macro_export]
+macro_rules! assert_near {
+    ($actual:expr, $expected:expr, $tol:expr) => {{
+        let (a, e, t) = ($actual, $expected, $tol);
+        assert!((a - e).abs() <= t, "{} = {}, expected {} ± {}", stringify!($actual), a, e, t);
+    }};
+    ($actual:expr, $expected:expr, $tol:expr, $($msg:tt)+) => {{
+        let (a, e, t) = ($actual, $expected, $tol);
+        assert!((a - e).abs() <= t, "{} = {}, expected {} ± {}: {}", stringify!($actual), a, e, t, format!($($msg)+));
+    }};
 }

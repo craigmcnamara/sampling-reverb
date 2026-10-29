@@ -20,7 +20,7 @@ The controls are inspired by the Strymon NightSky.
 | Plugin format      | AUv3 app extension (`aufx` effect), macOS 13+                  |
 | Standalone         | The containing SwiftUI app hosts the same AU via AVAudioEngine |
 | Ableton            | Live finds the AU through the system Audio Unit registry      |
-| DSP                | Rust (`dsp/`), real-time safe (no allocation/locks in render), linked as a universal static library through a C ABI. The original C++17 kernel (`Extension/DSP`) is kept as the reference it's tested against |
+| DSP                | Rust (`dsp/`), real-time safe (no allocation/locks in render), linked as a universal static library through a C ABI |
 | AU class           | Thin Objective-C++ `AUAudioUnit` subclass (owns the render block) |
 | UI                 | SwiftUI (controls) + Metal (`MTKView`) for scope, particles, bloom |
 | Project generation | XcodeGen (`project.yml`). The `.xcodeproj` is generated, not committed |
@@ -36,7 +36,7 @@ bounds-checked or masked, the kernel's thread roles are encoded in its types (at
 parameters, an `UnsafeCell` touched only by the render call, a single-producer/single-consumer
 triple buffer for visuals), and the few `unsafe` blocks are confined to the C ABI and those
 documented hand-offs. A panic aborts the extension rather than corrupting memory (Live
-reports the plugin as disconnected). The port is bit-identical to the C++ kernel; see §11.
+reports the plugin as disconnected). It replaced an earlier C++ kernel bit for bit; see §11.
 
 **The C ABI** (`dsp/include/sr_dsp.h`, `dsp/src/ffi.rs`): the AU creates a kernel with
 `sr_kernel_new`, prepares it in `allocateRenderResources`, calls `sr_kernel_process` from the
@@ -277,7 +277,7 @@ they near discard.
 New parameters are always added at the end, so the addresses in saved Live sets stay valid.
 
 ### Factory presets
-There are seven AU factory presets, defined in `Extension/DSP/Presets.hpp`. They appear as the
+There are seven AU factory presets, defined in `dsp/src/params.rs`. They appear as the
 bottom toolbar in the plugin UI and in the host's preset menu.
 
 - **Default** is always first. It's built from the parameter table at compile time, so it
@@ -419,15 +419,13 @@ project.yml                 XcodeGen spec (app + AUv3 extension)
 App/                        Standalone SwiftUI host app
 Extension/                  AUv3 extension
   AU/                       ObjC++ AUAudioUnit subclass + bridging header
-  DSP/                      Shared C headers (ParamIDs.h, VisualTypes.h) and the C++ reference DSP
+  DSP/                      Shared C headers (ParamIDs.h, VisualTypes.h)
   UI/                       SwiftUI controls, Metal scope renderer, shaders
   UI/Logic/                 Pure-Swift UI logic (mapping, plot space, particles, slot events)
 dsp/                        Rust DSP core (kernel, reverb, pool, analyzer…) and its C ABI
   include/sr_dsp.h          C header for the AU
   tests/                    Rust tests (`make test-rust`)
 tools/build-rust.sh         Builds the universal static library (run by make and Xcode)
-Tests/DSP/                  C++ reference tests (dependency-free harness, `make test-dsp`)
-Tests/Parity/               C++ reference vs Rust, bit for bit (`make test-parity`)
 Tests/Swift/                Swift Testing suites for UI/Logic (`make test-swift`)
 docs/design.md              This document
 ```
@@ -438,42 +436,32 @@ docs/design.md              This document
 
 Tests are written first wherever it's practical.
 
-- **Rust DSP** (`dsp/tests`, `make test-rust`): the building blocks (delay lines, allpass
-  energy, the SVF, half floats over every bit pattern, the triple buffer under concurrency),
-  reverb tail, freeze and stability with full Shimmer and Sub, engine pitch analysis, capture,
-  matching, Harmony, Retention, Density and quantize, kernel bypass, in-place and mono-in-place
-  processing at any block size, every common sample rate, random-parameter abuse, synced
-  Pre-delay, host-transport quantize, presets, a null-safe C ABI, and **no allocation in
-  `process`**.
-- **Parity** (`Tests/Parity`, `make test-parity`): runs the C++ reference and the Rust kernel
-  side by side on about 4.5 minutes of audio across 44.1–96 kHz, random block sizes, in place,
-  mono, host clock and free-running, with presets, Sync, Quantize, Freeze, Filter and fractional
-  tempos changing every fraction of a second, and requires **bit-identical** output, triggers,
-  captures, visuals and clock. It also checks every parameter spec, preset and value name, and
-  that half-float rounding matches `_Float16` across a sweep of the float range. (The C++ side
-  is built with `-ffp-contract=off`, because Rust never fuses multiply-adds.)
-- **C++ reference** (`Tests/DSP`, about 90 cases). This is a tiny built-in harness, built with
-  clang and with no dependencies. It covers:
-  - the building blocks (delay lines, allpass energy, the SVF, the triple buffer under
-    concurrency)
-  - pitch-shifter accuracy, RT60 tracking, freeze and stability under extreme settings
-  - engine behaviour: pitch and brightness analysis, capture, matching, Harmony, Focus,
-    Retention and life extension, pool replacement, Freeze and Density
-  - kernel contracts: bypass and dry are bit-exact, in-place processing, any block size,
-    sample rates from 44.1 to 192 kHz, and random-parameter abuse
-  - Shimmer and Sub regressions: no runaway (at most +6 dB) for every interval with stereo
-    and left-only input, balanced wet output for left-only input, and the shifted pitch
-    clearly present when on and absent when off
-  - presets: Default matches the parameter defaults, every value is within range, presets
-    are distinct, every preset rings stably with real input, and presets leave the clock alone
-  - quantize: triggers land exactly on the grid (straight and triplet, from the bar origin), a
-    waiting slot isn't queued twice, the kernel follows a playing host, runs free at the host
-    tempo when stopped, runs at the Tempo parameter without a host, and 1 bar follows the host
-    time signature
-  - sync: synced Pre-delay delays the wet output by exactly the division at the tempo
-    (including dotted and triplet values, and past the free knob's 500 ms), Sync off keeps the
-    free Pre-delay, and synced Length captures whole beats and bars in the host time signature,
-    capped at 20 s
+- **Rust DSP** (`dsp/tests`, `make test-rust`, about 95 cases), one file per area:
+  - `building_blocks`: delay lines, allpass energy, the SVF, half floats over every bit
+    pattern, and the triple buffer (latest-value semantics, no tearing under concurrency)
+  - `reverb`: pitch-shifter accuracy, decorrelated stereo tail, RT60 tracking, freeze, and
+    stability under extreme settings
+  - `engine`: pitch and brightness analysis, map position, capture, Sensitivity, matching,
+    Harmony, Match, Focus, Retention and life extension, pool replacement, Freeze, Density,
+    visuals, Attack, long captures, click-free fades, gentle voice steals, and quantize
+    (exact grid points, triplets, bar origin, no double-queuing)
+  - `kernel`: bypass and dry are bit-exact, routing (Dry Feed, Sample Level), in-place and
+    mono-in-place processing at any block size, sample rates from 44.1 to 192 kHz, random and
+    out-of-range parameters with wild host times; Shimmer and Sub regressions (no runaway above
+    +6 dB for every interval with stereo and left-only input, balanced wet output, the shifted
+    pitch present when on and absent when off, the guitar body kept, the undertone series
+    present); the host and free-running clocks, stopped transport and time signatures; synced
+    Pre-delay and Length
+  - `presets`: names, ranges, Default matches the parameter defaults, presets are distinct,
+    ring stably with real input, leave the clock alone, and Night Sky's guitar voicing
+  - `ffi`: the C ABI's metadata, null pointers and bad indexes
+  - `no_alloc`: a counting global allocator fails the test if `process` allocates at all,
+    across every preset, Sync, Quantize, host-clock state and block size
+- The Rust core began as a line-for-line port of an earlier C++17 kernel. Before the C++ was
+  removed, a parity harness ran both side by side on about 4.5 minutes of audio (44.1–96 kHz,
+  random block sizes, in place, mono, host and free-running clocks, with presets, Sync,
+  Quantize and fractional tempos changing constantly) and confirmed bit-identical output,
+  triggers, captures, visuals and clock. The C++ tests were ported case by case.
 - **Swift** (`Tests/Swift`, Swift Testing). The UI logic that doesn't depend on AppKit or
   Metal lives in `Extension/UI/Logic` and is compiled straight into a hostless test bundle.
   Those tests cover parameter mapping, plot coordinates, the particle system (including
@@ -488,4 +476,4 @@ Tests are written first wherever it's practical.
 - Reverse and half-speed voice playback modes (NightSky-style "Texture" variants).
 - A NightSky-style step sequencer that modulates Filter.
 - MIDI input to trigger slots directly.
-- A CLAP/VST3 wrapper around the same C++ DSP core.
+- A CLAP/VST3 wrapper around the same Rust DSP core.

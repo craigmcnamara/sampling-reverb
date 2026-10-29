@@ -8,7 +8,6 @@ use std::ptr;
 
 use crate::kernel::{Kernel, SRClockSummary, SRHostTime};
 use crate::params::{preset_leaves_alone, value_names, PARAM_COUNT, PARAM_SPECS, PRESETS, PRESET_COUNT};
-use crate::util::F16;
 use crate::visual::{SRSlotVisual, SR_MAX_SLOTS};
 
 /// Opaque handle; C sees `SRKernel *`.
@@ -220,28 +219,4 @@ pub extern "C" fn sr_preset_value(index: i32, address: u64) -> f32 {
 #[no_mangle]
 pub extern "C" fn sr_preset_leaves_alone(address: u64) -> bool {
     preset_leaves_alone(address)
-}
-
-// ---- Test hooks -----------------------------------------------------------------------------------
-
-/// Total triggers and captures so far, for the parity tests.
-///
-/// # Safety
-/// `k` must be null or a live kernel that isn't rendering.
-#[no_mangle]
-pub unsafe extern "C" fn sr_kernel_debug_counts(k: *const SRKernel, triggers: *mut u64, captures: *mut u64) {
-    let Some(k) = k.as_ref() else { return };
-    let e = k.0.engine();
-    if !triggers.is_null() {
-        *triggers = e.total_triggers();
-    }
-    if !captures.is_null() {
-        *captures = e.total_captures();
-    }
-}
-
-/// The half-float conversion used for the sample pool, for the parity tests.
-#[no_mangle]
-pub extern "C" fn sr_debug_f16_round_trip(x: f32) -> f32 {
-    F16::from_f32(x).to_f32()
 }

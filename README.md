@@ -19,7 +19,7 @@ See [docs/design.md](docs/design.md) for how it works.
 ```sh
 make install    # builds, copies to /Applications, registers the AU and launches the app
 make validate   # runs Apple's auval against the plugin
-make test       # Rust DSP tests, C++ reference tests, C++/Rust parity, Swift tests
+make test       # Rust DSP tests + Swift tests
 ```
 
 The standalone app starts with the source **Off**. Pick your input and output devices, then choose
