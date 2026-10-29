@@ -1,5 +1,7 @@
 # Sampling Reverb
 
+![Sampling Reverb running in Ableton Live](docs/images/screenshot.png)
+
 A macOS Audio Unit (AUv3) reverb that samples what you play and replays matching phrases into a
 shimmering, NightSky-style reverb. It runs standalone or as an effect in Ableton Live.
 See [docs/design.md](docs/design.md) for how it works.
