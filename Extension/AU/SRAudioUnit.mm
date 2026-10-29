@@ -124,13 +124,17 @@ AudioUnitParameterUnit unitFor(sr::Unit unit) {
     NSMutableArray<AUParameter*>* params = [NSMutableArray array];
     for (const auto& spec : sr::kParamSpecs) {
         NSArray<NSString*>* valueStrings = nil;
-        if (spec.address == SRParamInterval || spec.address == SRParamGrid) {
+        auto names = [](const char* const* list, int count) {
             NSMutableArray* names = [NSMutableArray array];
-            if (spec.address == SRParamInterval)
-                for (const char* name : sr::kIntervalNames) [names addObject:@(name)];
-            else
-                for (const char* name : sr::kGridNames) [names addObject:@(name)];
-            valueStrings = names;
+            for (int i = 0; i < count; ++i) [names addObject:@(list[i])];
+            return names;
+        };
+        switch (spec.address) {
+            case SRParamInterval: valueStrings = names(sr::kIntervalNames, sr::kIntervalCount); break;
+            case SRParamGrid: valueStrings = names(sr::kGridNames, sr::kGridCount); break;
+            case SRParamPreDelayDiv: valueStrings = names(sr::kPreDelayDivNames, sr::kPreDelayDivCount); break;
+            case SRParamLengthDiv: valueStrings = names(sr::kLengthDivNames, sr::kLengthDivCount); break;
+            default: break;
         }
         AudioUnitParameterOptions flags = kAudioUnitParameterFlag_IsReadable | kAudioUnitParameterFlag_IsWritable;
         if (spec.exponential) flags |= kAudioUnitParameterFlag_DisplayExponential;

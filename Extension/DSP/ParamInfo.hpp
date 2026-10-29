@@ -20,10 +20,27 @@ inline constexpr int kIntervalCount = 6;
 inline constexpr float kIntervalSemitones[kIntervalCount] = {-12.f, -5.f, 5.f, 7.f, 12.f, 19.f};
 inline constexpr const char* kIntervalNames[kIntervalCount] = {"-12", "-5", "+5", "+7", "+12", "+19"};
 
-// Quantize grid, in quarter-note beats. A value <= 0 means one bar of the current time signature.
+// Note divisions are in quarter-note beats; a negative value -n means n bars of the current time
+// signature.
+inline double divisionBeats(double division, double barBeats) { return division < 0.0 ? -division * barBeats : division; }
+
+// Quantize grid.
 inline constexpr int kGridCount = 8;
-inline constexpr double kGridBeats[kGridCount] = {0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 0.0};
+inline constexpr double kGridBeats[kGridCount] = {0.125, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, -1.0};
 inline constexpr const char* kGridNames[kGridCount] = {"1/32", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2", "1 Bar"};
+
+// Synced Pre-delay: T = triplet, D = dotted.
+inline constexpr int kPreDelayDivCount = 13;
+inline constexpr double kPreDelayDivBeats[kPreDelayDivCount] = {
+    1.0 / 16, 1.0 / 12, 1.0 / 8, 1.0 / 6, 1.0 / 4, 3.0 / 8, 1.0 / 3, 1.0 / 2, 3.0 / 4, 2.0 / 3, 1.0, 3.0 / 2, 2.0};
+inline constexpr const char* kPreDelayDivNames[kPreDelayDivCount] = {
+    "1/64", "1/32T", "1/32", "1/16T", "1/16", "1/16D", "1/8T", "1/8", "1/8D", "1/4T", "1/4", "1/4D", "1/2"};
+inline constexpr float kMaxPreDelaySec = 3.f;  // a half note at 40 BPM
+
+// Synced Length.
+inline constexpr int kLengthDivCount = 7;
+inline constexpr double kLengthDivBeats[kLengthDivCount] = {0.5, 1.0, 2.0, -1.0, -2.0, -4.0, -8.0};
+inline constexpr const char* kLengthDivNames[kLengthDivCount] = {"1/8", "1/4", "1/2", "1 Bar", "2 Bars", "4 Bars", "8 Bars"};
 
 inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamMix,         "mix",         "Mix",          0.f,   100.f,  50.f,  Unit::Percent,      false},
@@ -54,11 +71,15 @@ inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamQuantize,    "quantize",    "Quantize",     0.f,   1.f,    0.f,   Unit::Boolean,      false},
     {SRParamGrid,        "grid",        "Grid",         0.f,   7.f,    3.f,   Unit::Indexed,      false},
     {SRParamTempo,       "tempo",       "Tempo",        40.f,  240.f,  120.f, Unit::Bpm,          false},
+    {SRParamSync,        "sync",        "Sync",         0.f,   1.f,    0.f,   Unit::Boolean,      false},
+    {SRParamPreDelayDiv, "predelaydiv", "Pre-delay Sync", 0.f, 12.f,   2.f,   Unit::Indexed,      false},
+    {SRParamLengthDiv,   "lengthdiv",   "Length Sync",  0.f,   6.f,    3.f,   Unit::Indexed,      false},
 };
 
 // Performance controls: presets leave these alone (Freeze, and the clock, which belongs to the song).
 inline constexpr bool presetLeavesAlone(uint64_t address) {
-    return address == SRParamFreeze || address == SRParamQuantize || address == SRParamGrid || address == SRParamTempo;
+    return address == SRParamFreeze || address == SRParamQuantize || address == SRParamGrid || address == SRParamTempo ||
+           address == SRParamSync;
 }
 
 } // namespace sr

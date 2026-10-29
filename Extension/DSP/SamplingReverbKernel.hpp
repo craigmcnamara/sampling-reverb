@@ -66,8 +66,8 @@ public:
         sr_ = static_cast<float>(sampleRate);
         reverb_.prepare(sr_);
         engine_.prepare(sr_);
-        preL_.allocate(static_cast<uint32_t>(0.51f * sr_));
-        preR_.allocate(static_cast<uint32_t>(0.51f * sr_));
+        preL_.allocate(static_cast<uint32_t>((kMaxPreDelaySec + 0.01f) * sr_));
+        preR_.allocate(static_cast<uint32_t>((kMaxPreDelaySec + 0.01f) * sr_));
         filterL_.reset();
         filterR_.reset();
         for (auto& v : scopeL_) v = 0.f;
@@ -151,11 +151,19 @@ private:
             beat_ = host_.beat;
             barOrigin_ = host_.downbeat;
         }
-        const int grid = std::min(std::max(static_cast<int>(std::lround(p(SRParamGrid))), 0), kGridCount - 1);
-        gridBeats_ = kGridBeats[grid] > 0.0 ? kGridBeats[grid] : barBeats_;
+        gridBeats_ = divisionBeats(kGridBeats[index(SRParamGrid, kGridCount)], barBeats_);
         shownTempo_.store(tempo, std::memory_order_relaxed);
         shownBeat_.store(beat_ - barOrigin_, std::memory_order_relaxed);
         shownFromHost_.store(fromHost, std::memory_order_relaxed);
+    }
+
+    int index(SRParam a, int count) const {
+        return std::min(std::max(static_cast<int>(std::lround(p(a))), 0), count - 1);
+    }
+
+    // The length of an indexed note-division parameter at the current tempo.
+    float syncedSeconds(SRParam a, const double* beats, int count) const {
+        return static_cast<float>(divisionBeats(beats[index(a, count)], barBeats_) / (beatsPerFrame_ * sr_));
     }
 
     void processChunk(const float* inL, const float* inR, float* outL, float* outR, int n) {
@@ -165,7 +173,10 @@ private:
         const float levelT = clampf(p(SRParamSampleLevel) / 100.f, 0.f, 1.f);
         const float dryT = clampf(p(SRParamDryFeed) / 100.f, 0.f, 1.f);
         const float filterT = clampf(p(SRParamFilter) / 100.f, -1.f, 1.f);
-        const float preT = clampf(p(SRParamPreDelay), 0.f, 500.f) * 0.001f * sr_;
+        const bool sync = p(SRParamSync) >= 0.5f;
+        const float preSec = sync ? syncedSeconds(SRParamPreDelayDiv, kPreDelayDivBeats, kPreDelayDivCount)
+                                  : clampf(p(SRParamPreDelay), 0.f, 500.f) * 0.001f;
+        const float preT = std::min(preSec, kMaxPreDelaySec) * sr_;
         const float sizeT = clampf(p(SRParamSize) / 100.f, 0.f, 1.f);
 
         if (first_) {
@@ -190,7 +201,7 @@ private:
         ep.sensitivityDb = p(SRParamSensitivity);
         ep.match = p(SRParamMatch) / 100.f;
         ep.harmony = p(SRParamHarmony) / 100.f;
-        ep.lengthSec = p(SRParamLength);
+        ep.lengthSec = sync ? syncedSeconds(SRParamLengthDiv, kLengthDivBeats, kLengthDivCount) : p(SRParamLength);
         ep.attackSec = p(SRParamAttack) * 0.001f;
         ep.density = static_cast<int>(std::lround(p(SRParamDensity)));
         ep.focusX = p(SRParamFocusX);
@@ -208,8 +219,7 @@ private:
         rp.texture = p(SRParamTexture) / 100.f;
         rp.mod = p(SRParamMod) / 100.f;
         rp.shimmer = p(SRParamShimmer) / 100.f;
-        const int interval = std::min(std::max(static_cast<int>(std::lround(p(SRParamInterval))), 0), kIntervalCount - 1);
-        rp.shimmerSemitones = kIntervalSemitones[interval];
+        rp.shimmerSemitones = kIntervalSemitones[index(SRParamInterval, kIntervalCount)];
         rp.sub = p(SRParamSub) / 100.f;
         rp.freeze = freeze;
         reverb_.setParams(rp);

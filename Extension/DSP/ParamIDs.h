@@ -38,6 +38,10 @@ typedef CF_ENUM(uint64_t, SRParam) {
     SRParamQuantize,
     SRParamGrid,
     SRParamTempo,
+    // Tempo: synced Pre-delay and Length
+    SRParamSync,
+    SRParamPreDelayDiv,
+    SRParamLengthDiv,
 
     SRParamCount
 };

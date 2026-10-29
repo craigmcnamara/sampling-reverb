@@ -542,3 +542,85 @@ TEST_CASE(kernel_grid_bar_uses_the_host_time_signature) {
     CHECK(fired % 72000 < 16 || fired % 72000 > 72000 - 16);
     CHECK(fired > onset + 2048);
 }
+
+// ---- Synced Pre-delay and Length -------------------------------------------------------------
+
+namespace {
+
+// Seconds from an impulse to the first wet output, with only the live input feeding the reverb.
+float wetArrival(std::initializer_list<std::pair<SRParam, float>> params) {
+    KernelRig rig;
+    rig.set(SRParamMix, 100.f);
+    rig.set(SRParamDryFeed, 100.f);
+    rig.set(SRParamSampleLevel, 0.f);
+    for (const auto& [p, v] : params) rig.set(p, v);
+    sig::Buffer in = sig::silence(0.1f, kSR);  // let the pre-delay settle on its target
+    const size_t at = in.size();
+    in.push_back(1.f);
+    sig::append(in, sig::silence(4.f, kSR));
+    rig.run(in);
+    for (size_t i = at; i < rig.outL.size(); ++i)
+        if (std::fabs(rig.outL[i]) > 1e-4f || std::fabs(rig.outR[i]) > 1e-4f) return (i - at) / kSR;
+    return -1.f;
+}
+
+} // namespace
+
+TEST_CASE(kernel_synced_pre_delay_follows_the_tempo) {
+    const float base = wetArrival({{SRParamPreDelay, 0.f}});
+    REQUIRE(base >= 0.f);
+    // 1/8 at 120 BPM = 250 ms; 1/4D at 60 BPM = 1.5 s, past the free knob's 500 ms.
+    const float eighth = wetArrival({{SRParamSync, 1.f}, {SRParamPreDelayDiv, 7.f}, {SRParamTempo, 120.f}});
+    const float dottedQuarter = wetArrival({{SRParamSync, 1.f}, {SRParamPreDelayDiv, 11.f}, {SRParamTempo, 60.f}});
+    const float triplet = wetArrival({{SRParamSync, 1.f}, {SRParamPreDelayDiv, 6.f}, {SRParamTempo, 100.f}});
+    std::printf("    base %.4f s, 1/8 @120 %.4f s, 1/4D @60 %.4f s, 1/8T @100 %.4f s\n", base, eighth, dottedQuarter, triplet);
+    CHECK_NEAR(eighth - base, 0.25f, 0.002f);
+    CHECK_NEAR(dottedQuarter - base, 1.5f, 0.002f);
+    CHECK_NEAR(triplet - base, 0.2f, 0.002f);
+}
+
+TEST_CASE(kernel_sync_off_keeps_the_free_pre_delay) {
+    const float base = wetArrival({{SRParamPreDelay, 0.f}});
+    const float free = wetArrival({{SRParamPreDelay, 100.f}, {SRParamPreDelayDiv, 12.f}});
+    CHECK_NEAR(free - base, 0.1f, 0.002f);
+}
+
+TEST_CASE(kernel_synced_length_captures_whole_beats_and_bars) {
+    auto captured = [](float div, float tempo) {
+        KernelRig rig;
+        rig.set(SRParamSync, 1.f);
+        rig.set(SRParamLengthDiv, div);
+        rig.set(SRParamTempo, tempo);
+        sig::Buffer in = sig::silence(0.1f, kSR);  // room for the whole pre-roll
+        sig::append(in, sig::toneBurst(330.f, 0.3f, 0.5f, kSR));
+        sig::append(in, sig::silence(21.f, kSR));
+        rig.run(in);
+        for (int s = 0; s < SR_MAX_SLOTS; ++s)
+            if (uint32_t len = rig.kernel.engine().slotLength(s)) return len / kSR;
+        return 0.f;
+    };
+    const float preroll = 0.01f;
+    CHECK_NEAR(captured(1.f, 120.f), 0.5f + preroll, 0.001f);   // 1/4 at 120
+    CHECK_NEAR(captured(3.f, 90.f), 8.f / 3.f + preroll, 0.001f);  // 1 bar of 4/4 at 90
+    CHECK_NEAR(captured(5.f, 160.f), 6.f + preroll, 0.001f);   // 4 bars at 160
+    CHECK_NEAR(captured(6.f, 60.f), 20.f + preroll, 0.001f);   // 8 bars at 60 is 32 s: capped at 20 s
+}
+
+TEST_CASE(kernel_synced_bar_lengths_follow_the_host_time_signature) {
+    KernelRig rig;
+    rig.set(SRParamSync, 1.f);
+    rig.set(SRParamLengthDiv, 4.f);  // 2 bars
+    HostTime t;
+    t.hasTempo = true;
+    t.tempo = 120.0;
+    t.hasPosition = true;
+    t.barBeats = 3.0;  // 3/4: 2 bars = 6 beats = 3 s
+    rig.kernel.setHostTime(t);
+    sig::Buffer in = sig::silence(0.1f, kSR);
+    sig::append(in, sig::toneBurst(330.f, 0.3f, 0.5f, kSR));
+    sig::append(in, sig::silence(4.f, kSR));
+    rig.run(in);
+    float len = 0.f;
+    for (int s = 0; s < SR_MAX_SLOTS; ++s) len = std::max(len, rig.kernel.engine().slotLength(s) / kSR);
+    CHECK_NEAR(len, 3.01f, 0.001f);
+}

@@ -200,6 +200,7 @@ public:
     // Introspection (used by tests).
     uint64_t totalTriggers() const { return totalTriggers_; }
     uint64_t totalCaptures() const { return totalCaptures_; }
+    uint32_t slotLength(int s) const { return slots_[s].active ? slots_[s].length : 0; }
     const Features& lastFeatures() const { return lastFeatures_; }
     int activeVoiceCount() const {
         int c = 0;

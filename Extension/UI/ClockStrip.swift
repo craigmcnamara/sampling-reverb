@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Header controls for trigger quantize: on/off, grid, tempo (drag or tap) and a beat light.
+/// Header clock controls: Quantize and its grid, Sync (Pre-delay and Length in note divisions),
+/// a beat light and the tempo (drag or tap).
 struct ClockStrip: View {
     @ObservedObject var model: PluginModel
     @ObservedObject var clock: ClockModel
@@ -11,24 +12,8 @@ struct ClockStrip: View {
         let on = model.value(.quantize) >= 0.5
         let fromHost = clock.display.fromHost
         HStack(spacing: 8) {
-            Button { model.set(.quantize, on ? 0 : 1) } label: {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(on ? Theme.accent : Color(white: 0.2))
-                        .frame(width: 7, height: 7)
-                        .shadow(color: on ? Theme.accent : .clear, radius: 4)
-                    Text("QUANTIZE")
-                }
-                .padding(.horizontal, 8)
-                .frame(height: 22)
-                .background(Capsule().fill(on ? Theme.accent.opacity(0.12) : Color(white: 0.11)))
-                .overlay(Capsule().stroke(on ? Theme.accent : Color(white: 0.22), lineWidth: 1))
-                .foregroundStyle(on ? Theme.accent : Theme.label)
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("Hold matched samples until the next grid point")
-
+            PillToggle(model: model, id: .quantize, label: "QUANTIZE")
+                .help("Hold matched samples until the next grid point")
             Menu {
                 ForEach(Array(model.valueNames(.grid).enumerated()), id: \.offset) { index, name in
                     Button(name) { model.set(.grid, Float(index)) }
@@ -41,6 +26,9 @@ struct ClockStrip: View {
             .fixedSize()
             .foregroundStyle(on ? Theme.value : Theme.label)
             .help("Grid")
+
+            PillToggle(model: model, id: .sync, label: "SYNC")
+                .help("Set Pre-delay and Length in note divisions of the tempo")
 
             BeatLight(display: clock.display)
 
@@ -76,6 +64,33 @@ struct ClockStrip: View {
             }
         }
         .font(.system(size: 10, weight: .semibold, design: .monospaced))
+    }
+}
+
+/// A small latching switch with a light.
+struct PillToggle: View {
+    @ObservedObject var model: PluginModel
+    let id: SRParam
+    let label: String
+
+    var body: some View {
+        let on = model.value(id) >= 0.5
+        Button { model.set(id, on ? 0 : 1) } label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(on ? Theme.accent : Color(white: 0.2))
+                    .frame(width: 7, height: 7)
+                    .shadow(color: on ? Theme.accent : .clear, radius: 4)
+                Text(label)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(Capsule().fill(on ? Theme.accent.opacity(0.12) : Color(white: 0.11)))
+            .overlay(Capsule().stroke(on ? Theme.accent : Color(white: 0.22), lineWidth: 1))
+            .foregroundStyle(on ? Theme.accent : Theme.label)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 

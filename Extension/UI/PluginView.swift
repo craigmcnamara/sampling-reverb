@@ -75,7 +75,7 @@ struct PluginView: View {
                     Knob(model: model, id: .harmony, label: "HARMONY", tint: Theme.amber)
                 }
                 GridRow {
-                    Knob(model: model, id: .length, label: "LENGTH", tint: Theme.amber)
+                    Knob(model: model, id: synced ? .lengthDiv : .length, label: "LENGTH", tint: Theme.amber)
                     Knob(model: model, id: .density, label: "DENSITY", tint: Theme.amber)
                 }
                 GridRow {
@@ -98,7 +98,7 @@ struct PluginView: View {
             Knob(model: model, id: .mix, label: "MIX")
             Knob(model: model, id: .decay, label: "DECAY")
             Knob(model: model, id: .size, label: "SIZE")
-            Knob(model: model, id: .preDelay, label: "PRE")
+            Knob(model: model, id: synced ? .preDelayDiv : .preDelay, label: "PRE")
             Knob(model: model, id: .tone, label: "TONE")
             Knob(model: model, id: .texture, label: "TEXTURE")
             Knob(model: model, id: .mod, label: "MOD")
@@ -127,6 +127,9 @@ struct PluginView: View {
         .padding(6)
         .background(Theme.panel, in: RoundedRectangle(cornerRadius: 10))
     }
+
+    /// Pre-delay and Length are set in note divisions instead of time.
+    private var synced: Bool { model.value(.sync) >= 0.5 }
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text)

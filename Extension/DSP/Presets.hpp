@@ -30,13 +30,13 @@ inline constexpr int kPresetCount = 7;
 // clang-format off
 inline constexpr Preset kPresets[kPresetCount] = {
     makeDefaultPreset(),
-    //                                          Mix  Decay Size Pre  Tone Tex  Mod  Shim Int  Filt Res  Frz  Ret  Sens Match Harm Len   Lvl  Dens Dry  FX    FY    Focus Sub  Atk
-    withPerformanceDefaults({"Night Sky",       {55, 12,   85,  40,  45,  80,  30,  35,  4,  -10,  0,   0,   60, -40,  40,   40,  6.0f, 80,  4,   40,  0.5f, 0.5f, 0,    35,  400}}),
-    withPerformanceDefaults({"Echo Garden",     {60, 5,    60,  80,  65,  30,  25,  0,   4,   0,   20,  0,   80, -45,  55,   85,  8.0f, 100, 6,   0,   0.5f, 0.5f, 0,    0,   60}}),
-    withPerformanceDefaults({"Dark Matter",     {50, 20,   100, 10,  25,  70,  60,  0,   0,  -55,  35,  0,   50, -40,  40,   20,  5.0f, 70,  4,   50,  0.5f, 0.5f, 0,    65,  800}}),
-    withPerformanceDefaults({"Glass Choir",     {50, 8,    70,  30,  90,  85,  35,  60,  3,   35,  25,  0,   40, -40,  45,   70,  3.0f, 70,  5,   50,  0.5f, 0.5f, 0,    0,   250}}),
-    withPerformanceDefaults({"Short Memory",    {40, 1.5f, 30,  0,   60,  40,  15,  0,   4,   0,   20,  0,   0,  -35,  50,   30,  0.4f, 90,  8,   60,  0.5f, 0.5f, 0,    0,   10}}),
-    withPerformanceDefaults({"Infinite Archive",{50, 25,   90,  60,  50,  60,  40,  20,  5,   0,   20,  0,   100, -50, 25,   50,  20.f, 80,  3,   30,  0.5f, 0.5f, 0,    25,  600}}),
+    //                                          Mix  Decay Size Pre  Tone Tex  Mod  Shim Int  Filt Res  Frz  Ret  Sens Match Harm Len   Lvl  Dens Dry  FX    FY    Focus Sub  Atk  Qnt Grid Tempo Sync PreDiv LenDiv
+    withPerformanceDefaults({"Night Sky",       {55, 12,   85,  40,  45,  80,  30,  35,  4,  -10,  0,   0,   60, -40,  40,   40,  6.0f, 80,  4,   40,  0.5f, 0.5f, 0,    35,  400, 0,   3,    120,   0,   2,     4}}),
+    withPerformanceDefaults({"Echo Garden",     {60, 5,    60,  80,  65,  30,  25,  0,   4,   0,   20,  0,   80, -45,  55,   85,  8.0f, 100, 6,   0,   0.5f, 0.5f, 0,    0,   60, 0,   3,    120,   0,   3,     5}}),
+    withPerformanceDefaults({"Dark Matter",     {50, 20,   100, 10,  25,  70,  60,  0,   0,  -55,  35,  0,   50, -40,  40,   20,  5.0f, 70,  4,   50,  0.5f, 0.5f, 0,    65,  800, 0,   3,    120,   0,   0,     4}}),
+    withPerformanceDefaults({"Glass Choir",     {50, 8,    70,  30,  90,  85,  35,  60,  3,   35,  25,  0,   40, -40,  45,   70,  3.0f, 70,  5,   50,  0.5f, 0.5f, 0,    0,   250, 0,   3,    120,   0,   0,     3}}),
+    withPerformanceDefaults({"Short Memory",    {40, 1.5f, 30,  0,   60,  40,  15,  0,   4,   0,   20,  0,   0,  -35,  50,   30,  0.4f, 90,  8,   60,  0.5f, 0.5f, 0,    0,   10, 0,   3,    120,   0,   0,     1}}),
+    withPerformanceDefaults({"Infinite Archive",{50, 25,   90,  60,  50,  60,  40,  20,  5,   0,   20,  0,   100, -50, 25,   50,  20.f, 80,  3,   30,  0.5f, 0.5f, 0,    25,  600, 0,   3,    120,   0,   2,     6}}),
 };
 // clang-format on
 

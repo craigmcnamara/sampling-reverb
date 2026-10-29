@@ -27,7 +27,7 @@ final class PluginModel: ObservableObject {
     private let presetValues: [[UInt64: Float]]
     private var tapTempo = TapTempo()
     /// Performance controls that presets leave alone (see presetLeavesAlone in ParamInfo.hpp).
-    private static let presetIgnored: Set<UInt64> = Set([SRParam.freeze, .quantize, .grid, .tempo].map(\.rawValue))
+    private static let presetIgnored: Set<UInt64> = Set([SRParam.freeze, .quantize, .grid, .tempo, .sync].map(\.rawValue))
 
     init(audioUnit: SRAudioUnit) {
         self.audioUnit = audioUnit

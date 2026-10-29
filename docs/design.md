@@ -168,14 +168,22 @@ they near discard.
   queue the same sample twice. Up to 8 triggers can wait at once; if more arrive, they fire right
   away instead of being lost.
 - Capture is not quantized: recording still starts at the onset, with its pre-roll.
-- Tempo, Quantize and Grid belong to the song, not the sound, so presets leave them alone (like
-  Freeze).
+- **Sync** sets Pre-delay and Length in note divisions of the same clock instead of in time:
+  - **Pre-delay:** 1/64 to 1/2, with triplets (T) and dotted values (D). The buffer holds 3 s,
+    which is a half note at 40 BPM.
+  - **Length:** 1/8, 1/4, 1/2, or 1, 2, 4 or 8 bars (using the host time signature), capped at
+    20 s.
+  - Each follows tempo changes as they happen. A Pre-delay change glides through the existing
+    ~50 ms smoothing; a new Length applies from the next capture.
+  - The free ms/s values stay as they are, so switching Sync off brings them back.
+- Tempo, Quantize, Grid and Sync belong to the song, not the sound, so presets leave them alone
+  (like Freeze). The Pre-delay and Length divisions are part of each preset.
 
 ---
 
 ## 4. Reverb engine
 
-- **Pre-delay**: 0–500 ms.
+- **Pre-delay**: 0–500 ms, or 1/64 to 1/2 note with Sync on (up to 3 s).
 - **Diffuser (Texture)**: four series allpasses per channel. Texture sets their gain
   (0–0.75): low Texture keeps the echoes distinct, high Texture smears them into a dense
   wash.
@@ -247,6 +255,9 @@ they near discard.
 | 25 | Quantize      | off/on             | off     | Tempo   |
 | 26 | Grid          | 1/32 … 1 bar       | 1/8     | Tempo   |
 | 27 | Tempo         | 40–240 BPM         | 120     | Tempo   |
+| 28 | Sync          | off/on             | off     | Tempo   |
+| 29 | Pre-delay Sync| 1/64 … 1/2 (T, D)  | 1/32    | Reverb  |
+| 30 | Length Sync   | 1/8 … 8 bars       | 1 bar   | Sampler |
 
 New parameters are always added at the end, so the addresses in saved Live sets stay valid.
 
@@ -275,7 +286,7 @@ one-pole filter (about 20 ms) on the audio thread.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  SAMPLING REVERB   (QUANTIZE) 1/8 ● 120.0 BPM [TAP]  pool 7/24  ⤢   │
+│  SAMPLING REVERB  (QUANTIZE) 1/8 (SYNC) ● 120.0 BPM [TAP] pool 7/24 ⤢ │
 │ ┌─────────────────────────────────────────────┐  ┌───────────────┐  │
 │ │ · · · · · · · · · ·  graticule · · · · · ·  │  │ RETENTION     │  │
 │ │        ✶  (playing: particles + bloom)      │  │ SENSITIVITY   │  │
@@ -317,9 +328,10 @@ one-pole filter (about 20 ms) on the audio thread.
 ### 6.2 Controls (SwiftUI)
 Rotary knobs: vertical drag, Shift for fine adjustment, double-click to reset. Each knob
 binds to an `AUParameter`, and parameter observers keep the UI in sync with host
-automation. Freeze is a latching footswitch-style button.
+automation. Freeze is a latching footswitch-style button. With Sync on, the PRE and LENGTH
+knobs switch to their note-division parameters.
 
-The header's clock strip has the Quantize switch, a Grid menu, a beat light (accent on the
+The header's clock strip has the Quantize switch, a Grid menu, the Sync switch, a beat light (accent on the
 downbeat, amber on other beats) and the tempo. When the tempo comes from the host it reads
 HOST and can't be changed. Otherwise it reads BPM: drag it to set the tempo (Shift for fine
 adjustment), double-click to reset, or use TAP, which averages the last few taps and starts
@@ -405,7 +417,7 @@ docs/design.md              This document
 
 Tests are written first wherever it's practical.
 
-- **C++ DSP** (`Tests/DSP`, about 85 cases). This is a tiny built-in harness, built with
+- **C++ DSP** (`Tests/DSP`, about 90 cases). This is a tiny built-in harness, built with
   clang and with no dependencies. It covers:
   - the building blocks (delay lines, allpass energy, the SVF, the triple buffer under
     concurrency)
@@ -423,6 +435,10 @@ Tests are written first wherever it's practical.
     waiting slot isn't queued twice, the kernel follows a playing host, runs free at the host
     tempo when stopped, runs at the Tempo parameter without a host, and 1 bar follows the host
     time signature
+  - sync: synced Pre-delay delays the wet output by exactly the division at the tempo
+    (including dotted and triplet values, and past the free knob's 500 ms), Sync off keeps the
+    free Pre-delay, and synced Length captures whole beats and bars in the host time signature,
+    capped at 20 s
 - **Swift** (`Tests/Swift`, Swift Testing). The UI logic that doesn't depend on AppKit or
   Metal lives in `Extension/UI/Logic` and is compiled straight into a hostless test bundle.
   Those tests cover parameter mapping, plot coordinates, the particle system (including
