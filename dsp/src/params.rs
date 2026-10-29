@@ -209,8 +209,8 @@ pub const PRESETS: [Preset; PRESET_COUNT] = [
     // "Default" is built from the parameter table so it can never drift from the real defaults.
     Preset { name: c"Default", values: default_values() },
     //                                       Mix   Decay Size   Pre   Tone  Tex   Mod   Shim  Int  Filt   Res   Frz  Ret    Sens   Match Harm  Len   Lvl    Dens Dry   FX   FY   Focus Sub   Atk    Qnt  Grid Tempo  Sync PreDiv LenDiv
-    with_performance_defaults(c"Night Sky",       [55.0, 12.0, 85.0,  40.0, 45.0, 80.0, 30.0, 35.0, 4.0, -10.0,  0.0, 0.0, 60.0,  -40.0, 40.0, 40.0, 6.0,  80.0,  4.0, 40.0, 0.5, 0.5, 0.0,  35.0, 400.0, 0.0, 3.0, 120.0, 0.0, 2.0,   4.0]),
-    with_performance_defaults(c"Echo Garden",     [60.0, 5.0,  60.0,  80.0, 65.0, 30.0, 25.0, 0.0,  4.0,  0.0,  20.0, 0.0, 80.0,  -45.0, 55.0, 85.0, 8.0,  100.0, 6.0, 0.0,  0.5, 0.5, 0.0,  0.0,  60.0,  0.0, 3.0, 120.0, 0.0, 3.0,   5.0]),
+    with_performance_defaults(c"Night Sky",       [65.0, 12.0, 85.0,  40.0, 45.0, 80.0, 30.0, 35.0, 4.0, -10.0,  0.0, 0.0, 60.0,  -40.0, 40.0, 40.0, 6.0,  80.0,  4.0, 40.0, 0.5, 0.5, 0.0,  35.0, 400.0, 0.0, 3.0, 120.0, 0.0, 2.0,   4.0]),
+    with_performance_defaults(c"Echo Garden",     [70.0, 5.0,  60.0,  80.0, 65.0, 30.0, 25.0, 0.0,  4.0,  0.0,  20.0, 0.0, 80.0,  -45.0, 55.0, 85.0, 8.0,  100.0, 6.0, 0.0,  0.5, 0.5, 0.0,  0.0,  60.0,  0.0, 3.0, 120.0, 0.0, 3.0,   5.0]),
     with_performance_defaults(c"Dark Matter",     [50.0, 20.0, 100.0, 10.0, 25.0, 70.0, 60.0, 0.0,  0.0, -55.0, 35.0, 0.0, 50.0,  -40.0, 40.0, 20.0, 5.0,  70.0,  4.0, 50.0, 0.5, 0.5, 0.0,  65.0, 800.0, 0.0, 3.0, 120.0, 0.0, 0.0,   4.0]),
     with_performance_defaults(c"Glass Choir",     [50.0, 8.0,  70.0,  30.0, 90.0, 85.0, 35.0, 60.0, 3.0,  35.0, 25.0, 0.0, 40.0,  -40.0, 45.0, 70.0, 3.0,  70.0,  5.0, 50.0, 0.5, 0.5, 0.0,  0.0,  250.0, 0.0, 3.0, 120.0, 0.0, 0.0,   3.0]),
     with_performance_defaults(c"Short Memory",    [40.0, 1.5,  30.0,  0.0,  60.0, 40.0, 15.0, 0.0,  4.0,  0.0,  20.0, 0.0, 0.0,   -35.0, 50.0, 30.0, 0.4,  90.0,  8.0, 60.0, 0.5, 0.5, 0.0,  0.0,  10.0,  0.0, 3.0, 120.0, 0.0, 0.0,   1.0]),

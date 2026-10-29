@@ -586,3 +586,33 @@ fn quantized_slot_is_not_triggered_twice_for_one_grid_point() {
     rig.feed(&two_notes);
     assert_eq!(rig.engine.total_triggers() - before, 1);
 }
+
+// ---- Gain staging --------------------------------------------------------------------------------
+
+#[test]
+fn overlapping_replays_do_not_stack_up_in_level() {
+    // One long noise sample, replayed every 0.25 s: up to four copies overlap. Their level should
+    // stay near a single replay's instead of adding up (+6 dB for four).
+    let mut rig = EngineRig::new(EngineParams { length_sec: 1.5, density: 8, attack_sec: 0.001, ..Default::default() });
+    // Flat (not decaying) noise, so earlier replays are still as loud as the newest one.
+    let mut rng = sampling_reverb_dsp::util::Rng::default();
+    let mut sustained: Buffer = (0..frames(1.6, SR)).map(|_| 0.3 * rng.bipolar()).collect();
+    for (i, v) in sustained.iter_mut().take(240).enumerate() {
+        *v *= i as f32 / 240.0;
+    }
+    rig.run(&sustained);
+    rig.wait(1.0);
+    assert_eq!(rig.engine.pool_count(), 1);
+    let start = rig.out_l.len();
+    rig.run(&noise_burst(0.2, 0.3, SR, 5));
+    rig.wait(0.05);
+    let single = rms(&rig.out_l, start + frames(0.08, SR), start + frames(0.2, SR));
+    for _ in 0..3 {
+        rig.run(&noise_burst(0.2, 0.3, SR, 5));
+        rig.wait(0.05);
+    }
+    let end = rig.out_l.len();
+    let stacked = rms(&rig.out_l, end - frames(0.15, SR), end);
+    assert!(rig.engine.total_triggers() >= 3);
+    assert!(db(stacked) - db(single) < 3.0, "overlapping replays {:+.1} dB louder than one", db(stacked) - db(single));
+}

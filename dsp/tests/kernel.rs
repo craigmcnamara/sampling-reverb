@@ -718,3 +718,61 @@ fn clock_reports_the_tempo_and_its_source() {
     assert_eq!(rig.kernel.clock().tempo, 121.25);
     assert!(rig.kernel.clock().from_host);
 }
+
+// ---- Gain staging --------------------------------------------------------------------------------
+
+/// Wet-only level relative to the dry input over the second half of repeated strums (with the
+/// sampler replaying), in dB.
+fn wet_vs_dry(params: &[(Param, f32)]) -> f32 {
+    let mut rig = KernelRig::new();
+    rig.set(Param::Length, 3.0);
+    rig.set(Param::Mix, 100.0);
+    for (p, v) in params {
+        rig.set(*p, *v);
+    }
+    let mut input = Buffer::new();
+    for _ in 0..6 {
+        append(&mut input, &strum(2.0, 0.5, SR));
+    }
+    rig.run(&input);
+    let n = input.len();
+    db(rms(&rig.out_l, n / 2, n)) - db(rms(&input, n / 2, n))
+}
+
+#[test]
+fn wet_sits_under_the_dry_at_any_decay() {
+    let levels: Vec<f32> = [1.0, 4.0, 12.0, 30.0].iter().map(|&d| wet_vs_dry(&[(Param::Decay, d)])).collect();
+    for (decay, level) in [1.0, 4.0, 12.0, 30.0].iter().zip(&levels) {
+        // Under the dry, so Mix 50% never buries the playing, but still clearly there.
+        assert!((-9.0..=-1.0).contains(level), "decay {decay} s: wet {level:+.1} dB vs dry");
+    }
+    let spread = levels.iter().cloned().fold(f32::MIN, f32::max) - levels.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(spread <= 3.0, "Decay changes the level by {spread:.1} dB: {levels:?}");
+}
+
+#[test]
+fn replayed_samples_do_not_swamp_the_live_feed() {
+    // The sampler's replays add to the reverb, but shouldn't dominate what the live input sends.
+    let live = wet_vs_dry(&[(Param::SampleLevel, 0.0)]);
+    let both = wet_vs_dry(&[]);
+    assert!(both - live <= 7.0, "replays add {:+.1} dB over the live feed", both - live);
+}
+
+#[test]
+fn freeze_holds_the_wet_level_indefinitely() {
+    // Bright input and the default Mod: the frozen loop must copy samples exactly, or it fades.
+    let mut rig = KernelRig::new();
+    rig.set(Param::Mix, 100.0);
+    rig.set(Param::Decay, 2.0);
+    rig.run(&noise_burst(2.0, 0.5, SR, 9));
+    let before = rms(&rig.out_l, rig.out_l.len() - frames(0.1, SR), rig.out_l.len());
+    rig.set(Param::Freeze, 1.0);
+    let at = rig.out_l.len();
+    rig.wait(30.0);
+    let level = |s: f32| db(rms(&rig.out_l, at + frames(s, SR), at + frames(s + 0.5, SR)));
+    // Freezing stops new input, so allow for the input that was still arriving; no jump in level.
+    assert!(level(0.2) - db(before) < 1.0, "jumped {:+.1} dB", level(0.2) - db(before));
+    for t in [2.0, 10.0, 29.0] {
+        assert!((level(t) - level(0.2)).abs() < 1.0, "frozen tail at {t} s is {:+.1} dB", level(t) - level(0.2));
+    }
+}

@@ -80,6 +80,11 @@ const MAX_SHIMMER_CROSSFADE: f32 = 0.5 * PI / 2.0;
 const MAX_SUB_CROSSFADE: f32 = 0.75 * PI / 2.0;
 /// Undertone series: f/2, f/2, f/3 (an octave and a fifth down) and f/4 (two octaves down).
 const UNDERTONE_SEMITONES: [f32; SHIMMER_LINES] = [-12.0, -12.0, -19.0196, -24.0];
+/// Loudness compensation: output × REFERENCE / energy^EXPONENT. Full compensation (exponent 0.5)
+/// overshoots in practice, because while you play, a long tail never reaches its steady level; 0.3
+/// keeps sustained playing at about the same level from a 1 s to a 30 s Decay.
+const LOUDNESS_REFERENCE: f32 = 1.25;
+const LOUDNESS_EXPONENT: f32 = 0.3;
 const MIN_SCALE: f32 = 0.25;
 const MAX_SCALE: f32 = 2.0;
 
@@ -95,8 +100,17 @@ pub struct FdnReverb {
     lfo_phase: [f32; N],
     lfo_inc: [f32; N],
     lp_coef: f32,
+    // Loudness compensation for Decay and Size (see `set_params`).
+    comp_target: f32,
+    comp: f32,
+    comp_primed: bool,
     len_coef: f32,
     mod_depth: f32,
+    mod_cur: f32,
+    freeze_glide: f32,
+    // Shimmer and Sub crossfade angles, gliding to 0 while frozen (see `process`).
+    shimmer_cur: f32,
+    sub_cur: f32,
     diff_l: [Allpass; 4],
     diff_r: [Allpass; 4],
     shifters: [PitchShifter; SHIMMER_LINES],
@@ -120,8 +134,15 @@ impl Default for FdnReverb {
             lfo_phase: [0.0; N],
             lfo_inc: [0.0; N],
             lp_coef: 0.5,
+            comp_target: 1.0,
+            comp: 1.0,
+            comp_primed: false,
             len_coef: 0.001,
             mod_depth: 0.0,
+            mod_cur: 0.0,
+            freeze_glide: 0.0,
+            shimmer_cur: 0.0,
+            sub_cur: 0.0,
             diff_l: Default::default(),
             diff_r: Default::default(),
             shifters: Default::default(),
@@ -166,6 +187,11 @@ impl FdnReverb {
         }
         self.shimmer_hp_coef = 1.0 - (-TWO_PI * 80.0 / self.sr).exp();
         self.len_coef = 1.0 - (-1.0 / (0.15 * self.sr)).exp();
+        self.comp_primed = false;
+        self.mod_cur = 0.0;
+        self.shimmer_cur = 0.0;
+        self.sub_cur = 0.0;
+        self.freeze_glide = 1.0 / (0.05 * self.sr); // up to a sample's adjustment in 50 ms
     }
 
     pub fn set_params(&mut self, p: &ReverbParams) {
@@ -173,7 +199,12 @@ impl FdnReverb {
         let scale = MIN_SCALE * (MAX_SCALE / MIN_SCALE).powf(clampf(p.size, 0.0, 1.0));
         let rt60 = max(p.decay_sec, 0.05);
         for j in 0..N {
-            self.target_len[j] = self.base_len[j] * scale;
+            // Frozen, the loop must copy samples exactly: a fractional (interpolated) read softens
+            // the sound a little on every pass, which a decaying tail hides but a frozen one
+            // recirculating forever doesn't (it faded ~6 dB a minute). So freeze glides each line
+            // to a whole-sample length, and the modulation to zero, then reads exactly.
+            let len = self.base_len[j] * scale;
+            self.target_len[j] = if p.freeze { len.round() } else { len };
             self.gain[j] = if p.freeze { 1.0 } else { 10f32.powf(-3.0 * self.target_len[j] / (rt60 * self.sr)) };
         }
         let cutoff = 1500.0 * 12f32.powf(clampf(p.tone, 0.0, 1.0));
@@ -183,7 +214,19 @@ impl FdnReverb {
             self.diff_l[k].g = g;
             self.diff_r[k].g = g;
         }
-        self.mod_depth = clampf(p.modulation, 0.0, 1.0) * 0.003 * self.sr;
+        self.mod_depth = if p.freeze { 0.0 } else { clampf(p.modulation, 0.0, 1.0) * 0.003 * self.sr };
+        // A feedback network with per-pass gain g builds a steady level of 1/(1-g²) in energy, so a
+        // long Decay (or large Size) would otherwise be much louder, not just longer. Scale the output
+        // down accordingly, so Decay mostly sets how long the tail rings. Frozen, the gain is 1 and the
+        // formula breaks down; hold the last value so the frozen pad doesn't jump.
+        if !p.freeze {
+            let energy: f32 = self.gain.iter().map(|g| 1.0 / (1.0 - g * g)).sum::<f32>() / N as f32;
+            self.comp_target = LOUDNESS_REFERENCE / energy.powf(LOUDNESS_EXPONENT);
+            if !self.comp_primed {
+                self.comp = self.comp_target;
+                self.comp_primed = true;
+            }
+        }
         for sh in &mut self.shifters {
             sh.set_semitones(p.shimmer_semitones);
         }
@@ -195,11 +238,13 @@ impl FdnReverb {
         // crossfade (cos/sin): the shifted copy is essentially uncorrelated with the original, so this
         // keeps the energy per pass, and the layers add richness instead of draining the reverb's
         // body. A linear crossfade lost up to half the energy every pass.
-        let shimmer_angle = clampf(self.p.shimmer, 0.0, 1.0) * MAX_SHIMMER_CROSSFADE;
-        let sub_angle = clampf(self.p.sub, 0.0, 1.0) * MAX_SUB_CROSSFADE;
-        let (shimmer_dry, shimmer_wet) = (shimmer_angle.cos(), shimmer_angle.sin());
-        let (sub_dry, sub_wet) = (sub_angle.cos(), sub_angle.sin());
+        //
+        // Frozen, both fade out of the loop. "Keeps the energy" is only on average, and at a loop gain
+        // of exactly 1 any error compounds forever: Shimmer climbed ~40 dB in a minute until it hit the
+        // limiter, and Sub drained the pad to silence. Freeze holds the sound as it was.
         let freeze = self.p.freeze;
+        let shimmer_angle = if freeze { 0.0 } else { clampf(self.p.shimmer, 0.0, 1.0) * MAX_SHIMMER_CROSSFADE };
+        let sub_angle = if freeze { 0.0 } else { clampf(self.p.sub, 0.0, 1.0) * MAX_SUB_CROSSFADE };
         let n = out_l.len();
         for i in 0..n {
             let mut xl = if freeze { 0.0 } else { in_l[i] };
@@ -209,23 +254,44 @@ impl FdnReverb {
                 xr = self.diff_r[k].process(xr);
             }
 
+            self.mod_cur += (self.mod_depth - self.mod_cur) * self.len_coef;
+            if freeze && self.mod_cur < 1e-4 {
+                self.mod_cur = 0.0;
+            }
             let mut o = [0f32; N];
             let mut s = [0f32; N];
             for j in 0..N {
-                self.cur_len[j] += (self.target_len[j] - self.cur_len[j]) * self.len_coef;
+                let diff = self.target_len[j] - self.cur_len[j];
+                if freeze {
+                    // A linear glide that always arrives. (The one-pole below stalls a fraction of a
+                    // sample short: near a 1000-sample length its step is smaller than an f32 can
+                    // resolve, so the length would never become whole.)
+                    self.cur_len[j] += clampf(diff, -self.freeze_glide, self.freeze_glide);
+                } else {
+                    self.cur_len[j] += diff * self.len_coef;
+                }
                 self.lfo_phase[j] += self.lfo_inc[j];
                 if self.lfo_phase[j] > TWO_PI {
                     self.lfo_phase[j] -= TWO_PI;
                 }
-                o[j] = self.lines[j].read(self.cur_len[j] + self.mod_depth * self.lfo_phase[j].sin());
+                o[j] = self.lines[j].read(self.cur_len[j] + self.mod_cur * self.lfo_phase[j].sin());
                 self.lp[j] += self.lp_coef * (o[j] - self.lp[j]);
                 s[j] = if freeze { o[j] } else { self.lp[j] };
             }
             hadamard8(&mut s);
+            self.shimmer_cur += (shimmer_angle - self.shimmer_cur) * self.len_coef;
+            self.sub_cur += (sub_angle - self.sub_cur) * self.len_coef;
+            if freeze && self.shimmer_cur < 1e-4 {
+                self.shimmer_cur = 0.0;
+            }
+            if freeze && self.sub_cur < 1e-4 {
+                self.sub_cur = 0.0;
+            }
             // Both shifted paths are high-passed: a grain shifter leaves very low frequencies (below
             // its grain rate) almost unshifted, so they'd stay correlated with the original and grow
             // on every pass under an equal-power crossfade.
-            if shimmer_angle > 0.0 {
+            if self.shimmer_cur > 0.0 {
+                let (shimmer_wet, shimmer_dry) = self.shimmer_cur.sin_cos();
                 for k in 0..SHIMMER_LINES {
                     let up = self.shifters[k].process(s[k]);
                     self.shimmer_hp[k] += self.shimmer_hp_coef * (up - self.shimmer_hp[k]);
@@ -235,7 +301,8 @@ impl FdnReverb {
             // Sub follows the undertone series on the other half of the lines and cascades on every
             // pass. A 2-pole 55 Hz high-pass keeps the undertones of low notes (which land at
             // 20–40 Hz) from turning into rumble; the warmth stays in the 60–250 Hz range.
-            if sub_angle > 0.0 {
+            if self.sub_cur > 0.0 {
+                let (sub_wet, sub_dry) = self.sub_cur.sin_cos();
                 for k in 0..SHIMMER_LINES {
                     let shifted = self.sub_shifters[k].process(s[SHIMMER_LINES + k]);
                     let (_, hp) = self.sub_hp[k].process(shifted);
@@ -247,8 +314,9 @@ impl FdnReverb {
                 let sign = if j & 2 != 0 { -1.0 } else { 1.0 };
                 self.lines[j].write(safe_limit(sign * input * 0.5 + self.gain[j] * s[j]));
             }
-            out_l[i] = (o[0] - o[2] + o[4] - o[6]) * 0.5;
-            out_r[i] = (o[1] - o[3] + o[5] - o[7]) * 0.5;
+            self.comp += (self.comp_target - self.comp) * self.len_coef;
+            out_l[i] = (o[0] - o[2] + o[4] - o[6]) * 0.5 * self.comp;
+            out_r[i] = (o[1] - o[3] + o[5] - o[7]) * 0.5 * self.comp;
         }
     }
 

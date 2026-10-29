@@ -168,6 +168,8 @@ pub struct SampleEngine {
     slots: [Slot; SLOTS],
     voices: [Voice; VOICES],
     meter_decay: f32,
+    bus_gain: f32,
+    bus_coef: f32,
     release_inc: f32,
     rng: Rng,
 
@@ -209,6 +211,8 @@ impl Default for SampleEngine {
             slots: [Slot::default(); SLOTS],
             voices: [Voice::default(); VOICES],
             meter_decay: 0.0,
+            bus_gain: 1.0,
+            bus_coef: 0.0,
             release_inc: 0.0,
             rng: Rng::default(),
             mono: Vec::new(),
@@ -260,6 +264,8 @@ impl SampleEngine {
         self.slow_coef = (-1.0 / (0.150 * self.sr)).exp();
         self.meter_decay = (-1.0 / (0.08 * self.sr)).exp();
         self.release_inc = 1.0 / (0.6 * self.sr); // a voice pushed out by Density fades, never chops
+        self.bus_gain = 1.0;
+        self.bus_coef = 1.0 - (-1.0 / (0.05 * self.sr)).exp();
     }
 
     pub fn set_params(&mut self, p: &EngineParams) {
@@ -318,6 +324,7 @@ impl SampleEngine {
             }
 
             let (mut ol, mut or) = (0.0f32, 0.0f32);
+            let mut sounding = 0.0f32;
             for v in &mut self.voices {
                 if !v.active {
                     continue;
@@ -339,12 +346,17 @@ impl SampleEngine {
                 let sl = self.pool_l[at].to_f32() * v.env;
                 let sr = self.pool_r[at].to_f32() * v.env;
                 v.pos += 1;
+                sounding += v.env * v.env;
                 ol += sl * v.gl;
                 or += sr * v.gr;
                 v.meter = max(0.5 * (sl.abs() + sr.abs()), v.meter * self.meter_decay);
             }
-            out_l[i] = ol;
-            out_r[i] = or;
+            // Overlapping replays are largely uncorrelated, so their energy adds: scale the bus by
+            // 1/sqrt(voices sounding) so a dense pool doesn't swamp the live signal.
+            let bus_target = 1.0 / max(sounding, 1.0).sqrt();
+            self.bus_gain += (bus_target - self.bus_gain) * self.bus_coef;
+            out_l[i] = ol * self.bus_gain;
+            out_r[i] = or * self.bus_gain;
         }
     }
 
@@ -741,8 +753,9 @@ impl SampleEngine {
             pos: 0,
             env: 0.0,
             env_inc: 1.0 / (max(self.p.attack_sec, 0.0005) * self.sr),
-            gl: angle.cos() * 1.41421356,
-            gr: angle.sin() * 1.41421356,
+            // Equal-power pan: a centred voice sits at -3 dB per side, like any mono source.
+            gl: angle.cos(),
+            gr: angle.sin(),
             meter: 0.0,
             start: self.frame,
         };

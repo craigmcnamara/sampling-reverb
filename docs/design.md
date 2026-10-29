@@ -163,7 +163,11 @@ they near discard.
   triggers at the cap, the oldest playing sample is faded out over 600 ms, never chopped.
   The spare voices let those fades finish while new samples start.
 - Each voice fades in over **Attack** (1 ms for a hard hit, up to 2 s for a slow swell;
-  default 100 ms) and plays the sample at its original rate. Each voice also gets a slight random pan spread.
+  default 100 ms) and plays the sample at its original rate. Each voice also gets a slight random pan spread,
+  with an equal-power pan law (a centred voice sits at −3 dB per side).
+- **Gain staging:** overlapping replays are largely uncorrelated, so their energy adds. The voice bus is
+  scaled by 1/√(voices sounding), smoothed over 50 ms, so four overlapping replays are about as loud as
+  one rather than 6 dB louder. Before this, the replays swamped the live signal.
 - A slot that is already playing can't be retriggered within 100 ms.
 
 ### 3.7 Tempo and trigger quantize
@@ -234,6 +238,23 @@ they near discard.
 - **Filter** (post-reverb, like NightSky's filter): one bipolar knob. Turning left of
   center gives a low-pass sweep (20 kHz → 200 Hz), right of center a high-pass sweep
   (20 Hz → 4 kHz), and center is off. **Resonance** sets the Q.
+- **Loudness compensation**: a feedback network with per-pass gain g builds a steady level of 1/(1−g²)
+  in energy, so a long Decay or large Size would otherwise be much louder, not just longer. The output is
+  scaled by `1.25 / energy^0.3`, where `energy` is the average 1/(1−g²) over the lines. Full compensation
+  (exponent 0.5) overshoots, because a long tail never reaches its steady level while you play; 0.3
+  keeps sustained playing within about 1 dB from a 1 s to a 30 s Decay. The gain is smoothed over 150 ms
+  and held while frozen. Measured on repeated strummed guitar at the Default preset, the wet signal
+  alone sits about 3.6 dB under the dry, so at Mix 50% the dry leads, and Mix 60–70% brings them level.
+- **Freeze is lossless**: frozen, the loop must copy samples exactly. A fractional (interpolated) delay
+  read softens the sound slightly on every pass, which a decaying tail hides but a frozen loop
+  recirculating forever doesn't (it faded about 6 dB a minute). So Freeze glides each line linearly to a
+  whole-sample length and the modulation to zero, then holds indefinitely (within 0.5 dB over a
+  minute). The glide is linear because the usual one-pole stalls short: near a 1000-sample length its
+  step is smaller than an `f32` can resolve.
+  Freeze also fades Shimmer and Sub out of the loop over about 150 ms. Their equal-power swap keeps
+  the energy only on average; at a loop gain of exactly 1 any error compounds forever, so frozen
+  Shimmer climbed about 40 dB a minute into the limiter and Sub drained the pad to silence. The frozen
+  pad holds the shimmer and undertones it already had.
 - **Mix**: an equal-power dry/wet crossfade.
 
 ---
@@ -343,7 +364,12 @@ one-pole filter (about 20 ms) on the audio thread.
 ### 6.2 Controls (SwiftUI)
 Rotary knobs: vertical drag, Shift for fine adjustment, double-click to reset. Each knob
 binds to an `AUParameter`, and parameter observers keep the UI in sync with host
-automation. Freeze is a latching footswitch-style button. With Sync on, the PRE and LENGTH
+automation. Freeze is a latching footswitch-style button.
+
+The plugin view never takes keyboard focus: the hosting view and the scope refuse first responder,
+since mouse input doesn't need it. Keys stay with the host (Live's space bar), and the remote view
+never has a focused view of ours when the host's focus moves. That situation made Apple's ViewBridge
+assert and drop the view, leaving the plugin window white. With Sync on, the PRE and LENGTH
 knobs switch to their note-division parameters.
 
 The header's clock strip has the Quantize switch, a Grid menu, the Sync switch, a beat light (accent on the

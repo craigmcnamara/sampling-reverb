@@ -45,7 +45,9 @@ final class ScopeMTKView: MTKView {
     var onScroll: ((Float) -> Void)?
     var onDoubleClick: (() -> Void)?
 
-    override var acceptsFirstResponder: Bool { true }
+    // Mouse input works without keyboard focus, and taking focus inside a plugin view swallows the
+    // host's keys (Live's space bar) and has broken the remote view when focus moved on.
+    override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {

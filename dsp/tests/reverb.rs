@@ -118,3 +118,23 @@ fn reverb_extreme_settings_stay_bounded() {
     assert!(all_finite(&rig.out_l) && all_finite(&rig.out_r));
     assert!(peak(&rig.out_l) < 8.0);
 }
+
+#[test]
+fn reverb_freeze_holds_steady_with_shimmer_and_sub() {
+    // At a loop gain of exactly 1, pitch shifting in the loop compounds forever: Shimmer used to climb
+    // ~40 dB a minute into the limiter and Sub drained the pad. Frozen, the loop holds what it has.
+    for (shimmer, sub) in [(0.6, 0.0), (0.0, 0.6), (1.0, 1.0)] {
+        let mut p = ReverbParams { decay_sec: 4.0, tone: 0.6, shimmer, sub, modulation: 0.5, ..defaults() };
+        let mut rig = ReverbRig::new(p);
+        rig.run(&noise_burst(2.0, 0.5, SR, 1));
+        p.freeze = true;
+        rig.reverb.set_params(&p);
+        rig.run(&silence(60.0, SR));
+        let level = |t: f32| db(rms(&rig.out_l, frames(2.0 + t, SR), frames(2.5 + t, SR)));
+        assert!(level(1.0) > -70.0, "shimmer {shimmer} sub {sub}: frozen pad is silent");
+        for t in [5.0, 20.0, 59.0] {
+            let drift = level(t) - level(1.0);
+            assert!(drift.abs() < 1.0, "shimmer {shimmer} sub {sub}: {drift:+.1} dB after {t} s frozen");
+        }
+    }
+}
