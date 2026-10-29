@@ -137,6 +137,7 @@ private:
         ep.match = p(SRParamMatch) / 100.f;
         ep.harmony = p(SRParamHarmony) / 100.f;
         ep.lengthSec = p(SRParamLength);
+        ep.attackSec = p(SRParamAttack) * 0.001f;
         ep.density = static_cast<int>(std::lround(p(SRParamDensity)));
         ep.focusX = p(SRParamFocusX);
         ep.focusY = p(SRParamFocusY);

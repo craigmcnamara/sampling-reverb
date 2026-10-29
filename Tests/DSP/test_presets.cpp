@@ -47,12 +47,19 @@ TEST_CASE(presets_are_distinct_from_each_other) {
 
 TEST_CASE(presets_all_sound_stable_and_audible) {
     constexpr float kSR = 48000.f;
-    sig::Buffer in;
+    sig::Buffer phrase;
     for (int i = 0; i < 6; ++i) {
-        sig::append(in, i % 3 == 2 ? sig::noiseBurst(0.3f, 0.5f, kSR, i + 1)
-                                   : sig::toneBurst(i % 2 ? 330.f : 220.f, 0.3f, 0.5f, kSR));
-        sig::append(in, sig::silence(0.5f, kSR));
+        sig::append(phrase, i % 3 == 2 ? sig::noiseBurst(0.3f, 0.5f, kSR, i + 1)
+                                       : sig::toneBurst(i % 2 ? 330.f : 220.f, 0.3f, 0.5f, kSR));
+        sig::append(phrase, sig::silence(0.5f, kSR));
     }
+    // Play, wait out the longest Length so every capture lands, then play again: presets with
+    // Dry Feed at 0 only make sound once samples are replayed.
+    float longest = 0.f;
+    for (const auto& preset : kPresets) longest = std::max(longest, preset.values[SRParamLength]);
+    sig::Buffer in = phrase;
+    sig::append(in, sig::silence(longest + 1.f, kSR));
+    sig::append(in, phrase);
     sig::append(in, sig::silence(2.f, kSR));
 
     for (const auto& preset : kPresets) {
@@ -88,4 +95,46 @@ TEST_CASE(presets_some_preset_uses_sub) {
     bool any = false;
     for (const auto& preset : kPresets) any = any || preset.values[SRParamSub] > 0.f;
     CHECK(any);
+}
+
+TEST_CASE(presets_night_sky_is_voiced_for_guitar) {
+    // Against the same preset with Shimmer and Sub off, on strummed guitar: the pitch layers must
+    // add warmth underneath, must not add chirpy brightness up top, and must keep the body.
+    constexpr float kSR = 48000.f;
+    const Preset* nightSky = nullptr;
+    for (const auto& p : kPresets)
+        if (std::strcmp(p.name, "Night Sky") == 0) nightSky = &p;
+    REQUIRE(nightSky != nullptr);
+
+    auto wet = [&](bool layers) {
+        Kernel k;
+        for (uint64_t p = 0; p < SRParamCount; ++p) k.setParameter(p, nightSky->values[p]);
+        k.setParameter(SRParamMix, 100.f);
+        if (!layers) {
+            k.setParameter(SRParamShimmer, 0.f);
+            k.setParameter(SRParamSub, 0.f);
+        }
+        k.prepare(kSR);
+        sig::Buffer in;
+        for (int i = 0; i < 4; ++i) sig::append(in, sig::strum(2.f, 0.5f, kSR));
+        sig::append(in, sig::silence(8.f, kSR));
+        sig::Buffer l(in.size()), r(in.size());
+        for (size_t i = 0; i < in.size(); i += 512) {
+            const int n = static_cast<int>(std::min<size_t>(512, in.size() - i));
+            k.process(&in[i], &in[i], &l[i], &r[i], n);
+        }
+        return l;
+    };
+    const sig::Buffer with = wet(true), without = wet(false);
+    const size_t from = sig::frames(4.f, kSR);
+    auto change = [&](float lo, float hi) {
+        return sig::bandEnergyDb(with, from, lo, hi, kSR) - sig::bandEnergyDb(without, from, lo, hi, kSR);
+    };
+    const float warmth = change(62.f, 250.f), body = change(250.f, 1000.f), top = change(2000.f, 8000.f);
+    std::printf("    Night Sky pitch layers: warmth (62-250 Hz) %+.1f dB, body (250 Hz-1 kHz) %+.1f dB, top (2-8 kHz) %+.1f dB\n",
+                warmth, body, top);
+    CHECK(warmth > 2.f);
+    CHECK(body > -3.f);
+    CHECK(top < 0.f);
+    CHECK(nightSky->values[SRParamResonance] == 0.f);  // no hidden resonant peak from the filter
 }

@@ -20,34 +20,43 @@ struct EngineParams {
     float match = 0.4f;          // 0…1 tolerance
     float harmony = 0.3f;        // 0 = similar, 1 = complementary
     float lengthSec = 0.8f;
+    float attackSec = 0.1f;      // fade-in of each replayed sample
     int density = 4;
     float focusX = 0.5f, focusY = 0.5f, focusAmount = 0.f;
     bool freeze = false;
 };
 
+// Pool samples are stored as half floats: ~66 dB of precision relative to the signal at any level,
+// at half the memory (24 slots x 20 s stereo is ~92 MB at 48 kHz instead of ~184 MB).
+using PoolSample = _Float16;
+
 class SampleEngine {
 public:
     static constexpr int kSlots = SR_MAX_SLOTS;
-    static constexpr int kVoices = 12;
-    static constexpr float kMaxLengthSec = 2.f;
+    static constexpr int kVoices = 16;    // room for voices still fading out after a Density steal
+    static constexpr int kRecorders = 3;  // captures that can record at the same time
+    static constexpr float kMaxLengthSec = 20.f;
 
     void prepare(float sampleRate) {
         sr_ = sampleRate;
         preroll_ = static_cast<uint32_t>(0.01f * sr_);
         window_ = sr_ > 64000.f ? 4096u : 2048u;
         maxLen_ = static_cast<uint32_t>(kMaxLengthSec * sr_) + preroll_;
-        const uint32_t histSize = nextPow2(maxLen_ + window_ + 16384);
+        // The history only needs the pre-roll and analysis window: captures record straight into
+        // their slot as audio arrives.
+        const uint32_t histSize = nextPow2(preroll_ + window_ + 16384);
         histL_.assign(histSize, 0.f);
         histR_.assign(histSize, 0.f);
         histMask_ = histSize - 1;
-        poolL_.assign(static_cast<size_t>(maxLen_) * kSlots, 0.f);
-        poolR_.assign(static_cast<size_t>(maxLen_) * kSlots, 0.f);
+        poolL_.assign(static_cast<size_t>(maxLen_) * kSlots, PoolSample(0));
+        poolR_.assign(static_cast<size_t>(maxLen_) * kSlots, PoolSample(0));
         for (int s = 0; s < kSlots; ++s) {
             slots_[s] = Slot {};
             slots_[s].L = &poolL_[static_cast<size_t>(s) * maxLen_];
             slots_[s].R = &poolR_[static_cast<size_t>(s) * maxLen_];
         }
         for (auto& v : voices_) v = Voice {};
+        for (auto& r : recorders_) r = Recorder {};
         mono_.assign(window_, 0.f);
         dec_.assign(window_, 0.f);
         acf_.assign(window_, 0.f);
@@ -55,13 +64,12 @@ public:
         frame_ = 0;
         fast_ = slow_ = 0.f;
         holdoff_ = 0;
-        analyzing_ = capturing_ = false;
+        analyzing_ = false;
         fastAtt_ = std::exp(-1.f / (0.001f * sr_));
         fastRel_ = std::exp(-1.f / (0.010f * sr_));
         slowCoef_ = std::exp(-1.f / (0.150f * sr_));
         meterDecay_ = std::exp(-1.f / (0.08f * sr_));
-        attackInc_ = 1.f / (0.005f * sr_);
-        releaseInc_ = 1.f / (0.010f * sr_);
+        releaseInc_ = 1.f / (0.6f * sr_);  // a voice pushed out by Density fades, never chops
     }
 
     void setParams(const EngineParams& p) { p_ = p; }
@@ -80,8 +88,16 @@ public:
             slow_ = fast_ + (slow_ - fast_) * slowCoef_;
             ++frame_;
 
+            for (auto& rec : recorders_) {
+                if (!rec.active) continue;
+                record(rec, l, r);
+                if (rec.start + rec.written >= rec.end) finishRecording(rec);
+            }
+
             if (holdoff_ > 0) {
-                --holdoff_;
+                // When the hold-off ends, re-baseline the slow envelope so the tail of the same
+                // attack can't count as a new onset; only a genuinely new attack can.
+                if (--holdoff_ == 0) slow_ = std::max(slow_, fast_);
             } else if (!analyzing_ && fast_ > thresh && fast_ > slow_ * 2.f) {
                 analyzing_ = true;
                 onsetFrame_ = frame_ - 1;
@@ -90,10 +106,6 @@ public:
             if (analyzing_ && frame_ >= onsetFrame_ + window_) {
                 analyzing_ = false;
                 handleOnset();
-            }
-            if (capturing_ && frame_ >= capEnd_) {
-                capturing_ = false;
-                finishCapture();
             }
 
             float ol = 0.f, orr = 0.f;
@@ -112,8 +124,8 @@ public:
                     v.active = false;
                     continue;
                 }
-                const float sl = s.L[v.pos] * v.env;
-                const float sr = s.R[v.pos] * v.env;
+                const float sl = static_cast<float>(s.L[v.pos]) * v.env;
+                const float sr = static_cast<float>(s.R[v.pos]) * v.env;
                 ++v.pos;
                 ol += sl * v.gl;
                 orr += sr * v.gr;
@@ -177,10 +189,11 @@ public:
 private:
     struct Slot {
         bool active = false;
+        bool recording = false;  // reserved by a Recorder; not playable until it finishes
         uint32_t generation = 0;
         uint32_t triggerCount = 0;
-        float* L = nullptr;
-        float* R = nullptr;
+        PoolSample* L = nullptr;
+        PoolSample* R = nullptr;
         uint32_t length = 0;
         float peak = 0.f;
         Features f;
@@ -197,6 +210,17 @@ private:
         float gl = 1.f, gr = 1.f;
         float meter = 0.f;
         uint64_t start = 0;
+    };
+
+    // Writes a capture into its slot a sample at a time, so long captures never need a big copy on
+    // the audio thread.
+    struct Recorder {
+        bool active = false;
+        int slot = 0;
+        uint64_t start = 0, end = 0;  // absolute frames, [start, end)
+        uint32_t written = 0;
+        float peak = 0.f;
+        Features f;
     };
 
     float maxLife() const {
@@ -316,53 +340,95 @@ private:
         }
         if (best >= 0) {
             trigger(best);
-        } else if (!p_.freeze && !capturing_) {
-            capturing_ = true;
-            capStart_ = onsetFrame_ >= preroll_ ? onsetFrame_ - preroll_ : 0;
-            const uint32_t len = static_cast<uint32_t>(clampf(p_.lengthSec, 0.05f, kMaxLengthSec) * sr_);
-            capEnd_ = std::min<uint64_t>(onsetFrame_ + len, capStart_ + maxLen_);
-            capFeatures_ = f;
+        } else if (!p_.freeze && !isBeingRecorded(f, 0.03f + 0.57f * p_.match)) {
+            startRecording(f);
         }
     }
 
-    void finishCapture() {
+    // A sound similar to one still being recorded is a repeat, not something new to capture.
+    bool isBeingRecorded(const Features& f, float threshold) const {
+        for (const auto& rec : recorders_)
+            if (rec.active && distance(f, rec.f) < threshold) return true;
+        return false;
+    }
+
+    int chooseCaptureSlot() const {
+        for (int s = 0; s < kSlots; ++s)
+            if (!slots_[s].active && !slots_[s].recording) return s;
         int target = -1;
-        for (int s = 0; s < kSlots && target < 0; ++s)
-            if (!slots_[s].active) target = s;
-        if (target < 0) {
-            float lowest = INFINITY;
-            for (int s = 0; s < kSlots; ++s) {
-                if (isPlaying(s)) continue;
-                if (slots_[s].life < lowest) {
-                    lowest = slots_[s].life;
-                    target = s;
-                }
+        float lowest = INFINITY;
+        for (int s = 0; s < kSlots; ++s) {
+            if (slots_[s].recording || isPlaying(s)) continue;
+            if (slots_[s].life < lowest) {
+                lowest = slots_[s].life;
+                target = s;
             }
         }
+        return target;
+    }
+
+    void startRecording(const Features& f) {
+        Recorder* rec = nullptr;
+        for (auto& r : recorders_)
+            if (!r.active) {
+                rec = &r;
+                break;
+            }
+        const int target = rec ? chooseCaptureSlot() : -1;
         if (target < 0) return;
 
         Slot& slot = slots_[target];
-        const uint32_t len = static_cast<uint32_t>(capEnd_ - capStart_);
-        const uint32_t fadeIn = std::max<uint32_t>(1, std::min(preroll_, len / 2));
-        const uint32_t fadeOut = std::max<uint32_t>(1, std::min(static_cast<uint32_t>(0.03f * sr_), len / 2));
-        float peak = 0.f;
-        for (uint32_t k = 0; k < len; ++k) {
-            const uint32_t idx = static_cast<uint32_t>(capStart_ + k) & histMask_;
-            float g = 1.f;
-            if (k < fadeIn) g = static_cast<float>(k) / fadeIn;
-            if (k >= len - fadeOut) g *= static_cast<float>(len - k) / fadeOut;
-            slot.L[k] = histL_[idx] * g;
-            slot.R[k] = histR_[idx] * g;
-            peak = std::max(peak, 0.5f * (std::fabs(slot.L[k]) + std::fabs(slot.R[k])));
+        slot.active = false;
+        slot.recording = true;
+        rec->active = true;
+        rec->slot = target;
+        rec->start = onsetFrame_ >= preroll_ ? onsetFrame_ - preroll_ : 0;
+        const uint32_t len = static_cast<uint32_t>(clampf(p_.lengthSec, 0.05f, kMaxLengthSec) * sr_);
+        rec->end = std::min<uint64_t>(onsetFrame_ + len, rec->start + maxLen_);
+        rec->written = 0;
+        rec->peak = 0.f;
+        rec->f = f;
+        // Catch up on the pre-roll and analysis window, which are still in the history.
+        for (uint64_t t = rec->start; t < frame_ && t < rec->end; ++t) {
+            const uint32_t idx = static_cast<uint32_t>(t) & histMask_;
+            record(*rec, histL_[idx], histR_[idx]);
+        }
+        if (rec->start + rec->written >= rec->end) finishRecording(*rec);
+    }
+
+    void record(Recorder& rec, float l, float r) {
+        Slot& slot = slots_[rec.slot];
+        const uint32_t k = rec.written++;
+        const uint32_t fadeIn = std::max<uint32_t>(1, preroll_);
+        const float g = k < fadeIn ? static_cast<float>(k) / fadeIn : 1.f;
+        slot.L[k] = static_cast<PoolSample>(l * g);
+        slot.R[k] = static_cast<PoolSample>(r * g);
+        rec.peak = std::max(rec.peak, 0.5f * (std::fabs(l) + std::fabs(r)) * g);
+    }
+
+    void finishRecording(Recorder& rec) {
+        Slot& slot = slots_[rec.slot];
+        // The capture may end mid-note, so taper the last quarter (30 ms to 2 s) with a raised cosine
+        // rather than chopping it.
+        const uint32_t len = rec.written;
+        const float fadeSec = clampf(0.25f * static_cast<float>(len) / sr_, 0.03f, 2.f);
+        const uint32_t fadeOut = std::max<uint32_t>(1, std::min(static_cast<uint32_t>(fadeSec * sr_), len / 2));
+        for (uint32_t k = len - fadeOut; k < len; ++k) {
+            const float x = static_cast<float>(len - k) / fadeOut;  // 1 → 0 across the fade
+            const float g = 0.5f - 0.5f * std::cos(kPi * x);
+            slot.L[k] = static_cast<PoolSample>(static_cast<float>(slot.L[k]) * g);
+            slot.R[k] = static_cast<PoolSample>(static_cast<float>(slot.R[k]) * g);
         }
         const float ml = maxLife();
+        slot.recording = false;
         slot.active = true;
         slot.generation++;
         slot.length = len;
-        slot.peak = peak;
-        slot.f = capFeatures_;
+        slot.peak = rec.peak;
+        slot.f = rec.f;
         slot.life = std::isinf(ml) ? 1.f : ml;
         slot.lastTrigger = frame_;
+        rec.active = false;
         totalCaptures_++;
     }
 
@@ -401,7 +467,7 @@ private:
         v.slot = s;
         v.pos = 0;
         v.env = 0.f;
-        v.envInc = attackInc_;
+        v.envInc = 1.f / (std::max(p_.attackSec, 0.0005f) * sr_);
         v.meter = 0.f;
         v.start = frame_;
         const float angle = (rng_.bipolar() * 0.4f + 1.f) * kPi * 0.25f;
@@ -422,14 +488,11 @@ private:
     uint64_t onsetFrame_ = 0;
     uint32_t window_ = 2048, preroll_ = 480, maxLen_ = 0;
 
-    bool capturing_ = false;
-    uint64_t capStart_ = 0, capEnd_ = 0;
-    Features capFeatures_;
-
-    std::vector<float> poolL_, poolR_;
+    Recorder recorders_[kRecorders];
+    std::vector<PoolSample> poolL_, poolR_;
     Slot slots_[kSlots];
     Voice voices_[kVoices];
-    float meterDecay_ = 0.f, attackInc_ = 0.f, releaseInc_ = 0.f;
+    float meterDecay_ = 0.f, releaseInc_ = 0.f;
     Rng rng_;
 
     std::vector<float> mono_, dec_, acf_;

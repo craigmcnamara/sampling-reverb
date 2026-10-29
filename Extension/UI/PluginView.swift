@@ -61,8 +61,8 @@ struct PluginView: View {
                     Knob(model: model, id: .dryFeed, label: "DRY FEED", tint: Theme.amber)
                 }
                 GridRow {
+                    Knob(model: model, id: .attack, label: "ATTACK", tint: Theme.amber)
                     Knob(model: model, id: .focusAmount, label: "FOCUS", tint: Theme.amber)
-                        .gridCellColumns(2)
                 }
             }
         }

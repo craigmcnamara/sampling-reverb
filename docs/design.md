@@ -72,7 +72,9 @@ both in Ableton and in the standalone app.
 - A fast envelope (1 ms attack, 10 ms release) is compared with a slow envelope (150 ms).
   An onset fires when `fast > slow × ratio` and `fast > threshold`. The threshold comes
   from **Sensitivity** (−60 to −20 dBFS). The ratio is fixed at about 2 (+6 dB).
-- After an onset, the detector holds off for 80 ms so one note doesn't fire twice.
+- After an onset, the detector holds off for 80 ms. When the hold-off ends, the slow envelope is
+  re-baselined to the current level, so only a genuinely new attack, not the tail of the same
+  note, can fire again.
 
 ### 3.2 Features
 After the onset, the analyzer waits 2048 samples (about 43 ms at 48 kHz). It then
@@ -106,16 +108,26 @@ d = w_t · |bright_a − bright_b|                    (timbre)
   thirds/sixths cost 0.15, unison 0.3, and 2nds, 7ths and the tritone cost 1.
 
 The best match with `d < Match` triggers playback. When there's no match, the onset
-counts as novel and is captured. One onset never both triggers and captures, so the pool
-stays diverse.
+counts as novel and is captured, unless it's similar to a capture that's still recording, in
+which case it's a repeat and is skipped. One onset never both triggers and captures, so the
+pool stays diverse.
 
 ### 3.4 Capture
-- The input history ring holds `maxLength + preroll` frames of stereo input.
-- A capture starts 10 ms before the onset (preroll) and runs for **Length** (0.1 s to 2 s).
-  Once the ring has filled, the segment is copied into a free slot in one memcpy. A short
-  fade-in and fade-out are applied to avoid clicks.
-- If the pool is full, the slot with the lowest remaining lifetime is reused, as long as
-  it isn't playing. If every slot is playing, the capture is dropped.
+- A capture starts 10 ms before the onset (pre-roll) and runs for **Length** (0.1 s to 20 s,
+  exponential knob, default 3 s). Long takes keep the pick, the decay and the phrasing.
+  Short slices of sustained notes, faded in and out, tend to sound like organ notes.
+- When a capture starts, it reserves a slot: the first free slot, or else the one with the lowest
+  remaining life that isn't playing. If no slot is available, the capture is dropped.
+- Captures are **written through**: the pre-roll and analysis window are copied from the small
+  input history, then each new sample goes straight into the slot as it arrives. No audio
+  callback ever copies a whole sample, which matters at 20 s. A 10 ms fade-in is applied while
+  writing. When the capture finishes, the last quarter of it (30 ms to 2 s) is tapered with a
+  raised cosine, because a capture often ends while the note is still ringing.
+- Up to **3 captures** can record at once, so a long Length doesn't stop the pool from growing.
+- A slot isn't playable or matchable until its capture finishes.
+- **Memory:** the pool is stored as half floats (`_Float16`): about 66 dB of precision relative
+  to the signal at any level, at half the memory. 24 slots × 20 s stereo is about 92 MB per
+  instance at 48 kHz (184 MB at 96 kHz), allocated once in `allocateRenderResources`.
 
 ### 3.5 Lifetime and Retention
 Each slot has `life` (seconds) and `maxLife`:
@@ -132,10 +144,11 @@ In the UI, point brightness and size follow `life / maxLife`, so samples visibly
 they near discard.
 
 ### 3.6 Voices
-- There are 8 voices. **Density** (1–8) caps how many play at once. When a voice is
-  needed and none is free, the oldest one is released.
-- Each voice has a 5 ms attack, plays the sample at its original rate and fades out over
-  the last 30 ms. Each voice also gets a slight random pan spread.
+- There are 16 voices. **Density** (1–8) caps how many play at once. When a new sample
+  triggers at the cap, the oldest playing sample is faded out over 600 ms, never chopped.
+  The spare voices let those fades finish while new samples start.
+- Each voice fades in over **Attack** (1 ms for a hard hit, up to 2 s for a slow swell;
+  default 100 ms) and plays the sample at its original rate. Each voice also gets a slight random pan spread.
 - A slot that is already playing can't be retriggered within 100 ms.
 
 ---
@@ -155,18 +168,26 @@ they near discard.
   so more Mod makes it more chorused.
 - **Tone**: a one-pole low-pass inside the feedback loop (damping), from about 1.5 kHz
   to 18 kHz.
-- **Shimmer** (inside the feedback loop): after the Hadamard mix, lines 0–3 each go
-  through a two-grain crossfading pitch shifter. **Shimmer** sets how much of each line's
-  recirculating signal is *replaced* by its shifted copy, up to 70%. **Interval** picks the
-  shift: −12, −5, +5, +7, +12 or +19 semitones.
-  - Because the shifted copy replaces part of the signal instead of being added on top, and
-    a crossfading shifter never adds gain, the loop can never exceed the decay gain. Each
-    pass shifts again, so the cascade builds into the classic shimmer.
-  - An earlier version fed shifted output back into the reverb *input*. That pushed the
-    loop gain above 1 and the reverb ran away. A test now guards against that.
-- **Sub**: the same in-loop technique on lines 4–7, always one octave down and up to 90%
-  replacement. A 35 Hz high-pass on the sub path stops repeated octave-down passes from
-  piling up inaudible energy. Sub and Shimmer are independent and can be used together.
+- **Shimmer** (inside the feedback loop): after the Hadamard mix, lines 0–3 each go through a
+  two-grain crossfading pitch shifter. Part of each line's recirculating signal is swapped for
+  its shifted copy. **Interval** picks the shift: −12, −5, +5, +7, +12 or +19 semitones.
+  - **Equal-power crossfade:** the swap uses cos/sin gains, not a linear blend. The shifted copy
+    is essentially uncorrelated with the original, so this keeps each pass's energy, and the
+    layer adds richness instead of hollowing out the reverb. A linear blend lost up to half the
+    energy per pass, which drained 5–7 dB of a guitar's body.
+  - **High-pass (80 Hz) on the shifted path:** a grain shifter leaves content below its grain
+    rate almost unshifted, so that part stays correlated with the original and would grow under
+    an equal-power swap.
+  - **Gentler maximum:** Shimmer tops out at sin = 0.71, because it moves energy up into the
+    range Tone damps fastest.
+  - **History:** an earlier version fed shifted output back into the reverb *input*, which pushed
+    the loop gain above 1 and ran away. Tests now guard against both failure modes.
+- **Sub** (inside the feedback loop): the same equal-power swap on lines 4–7, tuned to the
+  undertone series: f/2, f/2, f/3 (an octave and a fifth down) and f/4 (two octaves down). Each
+  pass re-shifts, so the undertones cascade into a full, rich bed (max sin = 0.92). A 2-pole
+  55 Hz high-pass on the shifted path keeps the undertones of low notes, which land at
+  20–40 Hz, from becoming rumble. The warmth stays in the 60–250 Hz range. Sub and Shimmer are
+  independent and can be used together.
 - **Filter** (post-reverb, like NightSky's filter): one bipolar knob. Turning left of
   center gives a low-pass sweep (20 kHz → 200 Hz), right of center a high-pass sweep
   (20 Hz → 4 kHz), and center is off. **Resonance** sets the Q.
@@ -194,7 +215,7 @@ they near discard.
 | 13 | Sensitivity   | −60…−20 dBFS       | −40     | Sampler |
 | 14 | Match         | 0–100 %            | 40      | Sampler |
 | 15 | Harmony       | 0–100 %            | 30      | Sampler |
-| 16 | Length        | 0.1–2 s            | 0.8     | Sampler |
+| 16 | Length        | 0.1–20 s (exp.)    | 3       | Sampler |
 | 17 | Sample Level  | 0–100 %            | 80      | Sampler |
 | 18 | Density       | 1–8                | 4       | Sampler |
 | 19 | Dry Feed      | 0–100 %            | 50      | Sampler |
@@ -202,6 +223,7 @@ they near discard.
 | 21 | Focus Y       | 0–1                | 0.5     | X/Y     |
 | 22 | Focus         | 0–100 %            | 0       | X/Y     |
 | 23 | Sub           | 0–100 %            | 0       | Reverb  |
+| 24 | Attack        | 1–2000 ms (exp.)   | 100     | Sampler |
 
 New parameters are always added at the end, so the addresses in saved Live sets stay valid.
 
@@ -211,8 +233,11 @@ bottom toolbar in the plugin UI and in the host's preset menu.
 
 - **Default** is always first. It's built from the parameter table at compile time, so it
   always matches the true defaults, which is one click back from extreme settings.
-- The others are Night Sky, Echo Garden, Dark Matter (uses Sub), Glass Choir, Short Memory
-  and Infinite Archive.
+- The others are Night Sky, Echo Garden, Dark Matter, Glass Choir, Short Memory and Infinite
+  Archive.
+- **Night Sky is voiced for guitar:** octave shimmer plus Sub undertones, darker Tone, gentle
+  low-pass Filter with no resonance, and moderate Mod. A test checks that on strummed guitar
+  its pitch layers add warmth at 62–250 Hz, keep the body, and add no brightness at 2–8 kHz.
 - Choosing a preset sets every parameter through the parameter tree, so the host sees and
   can automate the change. Freeze is a performance control, so presets leave it alone.
 - A "•" next to the selected preset means a knob has moved since it was chosen.
@@ -306,8 +331,8 @@ slot's trigger counter changes.
 ---
 
 ## 9. Real-time safety rules
-- All buffers (input history ring, 24 slots × 2 s × stereo, delay lines) are allocated
-  in `allocateRenderResources`, sized for the current sample rate.
+- All buffers (input history ring, 24 slots × 20 s × stereo half floats, delay lines) are
+  allocated in `allocateRenderResources`, sized for the current sample rate.
 - The render path has no `new`, `malloc`, locks, Objective-C messaging or Swift.
 - Parameter changes reach the kernel through relaxed `std::atomic<float>` values, set
   from the parameter tree's `implementorValueObserver`.

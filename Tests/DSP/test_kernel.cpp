@@ -1,4 +1,6 @@
 #include "SamplingReverbKernel.hpp"
+
+#include <array>
 #include "Signals.hpp"
 #include "TestHarness.hpp"
 
@@ -13,7 +15,10 @@ struct KernelRig {
     sig::Buffer outL, outR;
     int block = 256;
 
-    explicit KernelRig(float sampleRate = kSR) { kernel.prepare(sampleRate); }
+    explicit KernelRig(float sampleRate = kSR) {
+        kernel.prepare(sampleRate);
+        set(SRParamLength, 0.8f);  // short captures keep the tests quick; the default is longer
+    }
 
     void run(const sig::Buffer& inL, const sig::Buffer& inR) {
         const size_t base = outL.size();
@@ -320,5 +325,92 @@ TEST_CASE(kernel_sub_never_runs_away) {
             CHECK(gainL <= 6.f);
             CHECK(gainR <= 6.f);
         }
+    }
+}
+
+TEST_CASE(kernel_attack_parameter_reaches_the_voices) {
+    // Wet-only, samples only: compare how loud the replayed sample is in its first 30 ms.
+    auto onset = [](float attackMs) {
+        KernelRig rig;
+        rig.set(SRParamMix, 100.f);
+        rig.set(SRParamDryFeed, 0.f);
+        rig.set(SRParamDecay, 0.3f);
+        rig.set(SRParamAttack, attackMs);
+        rig.run(sig::toneBurst(220.f, 0.4f, 0.5f, kSR));
+        rig.run(sig::silence(1.f, kSR));
+        const size_t start = rig.outL.size();
+        rig.run(sig::toneBurst(220.f, 0.4f, 0.5f, kSR));
+        size_t voice = start;
+        while (voice < rig.outL.size() && std::fabs(rig.outL[voice]) < 1e-7f) ++voice;
+        return sig::rms(rig.outL, voice, voice + sig::frames(0.03f, kSR));
+    };
+    const float fast = onset(1.f), slow = onset(1000.f);
+    CHECK(fast > 1e-3f);
+    CHECK(slow < 0.25f * fast);
+}
+
+TEST_CASE(kernel_length_goes_to_twenty_seconds) {
+    const ParamSpec& length = kParamSpecs[SRParamLength];
+    CHECK(length.max == 20.f);
+    CHECK(length.exponential);  // short lengths stay easy to dial in
+    CHECK(length.def >= 2.f);
+}
+
+namespace {
+
+// Wet output of a few strummed guitar chords followed by the tail.
+sig::Buffer wetGuitar(std::initializer_list<std::pair<SRParam, float>> params) {
+    KernelRig rig;
+    rig.set(SRParamMix, 100.f);
+    rig.set(SRParamDecay, 8.f);
+    for (const auto& [p, v] : params) rig.set(p, v);
+    sig::Buffer in;
+    for (int i = 0; i < 4; ++i) sig::append(in, sig::strum(2.f, 0.5f, kSR));
+    sig::append(in, sig::silence(6.f, kSR));
+    rig.run(in);
+    return rig.outL;
+}
+
+} // namespace
+
+TEST_CASE(kernel_pitch_layers_keep_the_reverbs_body) {
+    // Shimmer and Sub should add layers, not hollow out the guitar range (125 Hz – 1 kHz).
+    const size_t from = sig::frames(4.f, kSR);
+    const float plain = sig::bandEnergyDb(wetGuitar({}), from, 125.f, 1000.f, kSR);
+    const float shimmer = sig::bandEnergyDb(wetGuitar({{SRParamShimmer, 50.f}}), from, 125.f, 1000.f, kSR);
+    const float sub = sig::bandEnergyDb(wetGuitar({{SRParamSub, 50.f}}), from, 125.f, 1000.f, kSR);
+    std::printf("    body (125 Hz-1 kHz) change: shimmer 50%% %+.1f dB, sub 50%% %+.1f dB\n", shimmer - plain, sub - plain);
+    CHECK(shimmer - plain > -3.f);
+    CHECK(sub - plain > -3.f);
+}
+
+TEST_CASE(kernel_sub_adds_the_undertone_series) {
+    // A held 330 Hz note with Sub up gains energy at f/2, f/3 and f/4.
+    auto levels = [](float sub) {
+        KernelRig rig;
+        rig.set(SRParamMix, 100.f);
+        rig.set(SRParamDecay, 8.f);
+        rig.set(SRParamMod, 0.f);
+        rig.set(SRParamSub, sub);
+        rig.run(sig::sine(330.f, 4.f, 0.3f, kSR));
+        const size_t from = sig::frames(2.f, kSR), to = rig.outL.size();
+        const float f0 = sig::toneLevel(rig.outL, from, to, 330.f, kSR);
+        std::array<float, 3> rel {};
+        const float undertones[3] = {165.f, 110.f, 82.5f};
+        for (int k = 0; k < 3; ++k) {
+            // Grain shifters spread energy into sidebands, so take the strongest bin within ±12 Hz.
+            float best = 0.f;
+            for (float d = -12.f; d <= 12.f; d += 1.f)
+                best = std::max(best, sig::toneLevel(rig.outL, from, to, undertones[k] + d, kSR));
+            rel[k] = sig::db(best) - sig::db(f0);
+        }
+        return rel;
+    };
+    const auto on = levels(100.f), off = levels(0.f);
+    std::printf("    undertones vs fundamental, sub on: f/2 %.1f, f/3 %.1f, f/4 %.1f dB (off: %.1f, %.1f, %.1f)\n",
+                on[0], on[1], on[2], off[0], off[1], off[2]);
+    for (int k = 0; k < 3; ++k) {
+        CHECK(on[k] > -24.f);
+        CHECK(on[k] - off[k] > 15.f);
     }
 }

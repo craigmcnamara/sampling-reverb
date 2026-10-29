@@ -37,7 +37,7 @@ inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamSensitivity, "sensitivity", "Sensitivity", -60.f, -20.f,  -40.f,  Unit::Decibels,     false},
     {SRParamMatch,       "match",       "Match",        0.f,   100.f,  40.f,  Unit::Percent,      false},
     {SRParamHarmony,     "harmony",     "Harmony",      0.f,   100.f,  30.f,  Unit::Percent,      false},
-    {SRParamLength,      "length",      "Length",       0.1f,  2.f,    0.8f,  Unit::Seconds,      false},
+    {SRParamLength,      "length",      "Length",       0.1f,  20.f,   3.f,   Unit::Seconds,      true},
     {SRParamSampleLevel, "samplelevel", "Sample Level", 0.f,   100.f,  80.f,  Unit::Percent,      false},
     {SRParamDensity,     "density",     "Density",      1.f,   8.f,    4.f,   Unit::Generic,      false},
     {SRParamDryFeed,     "dryfeed",     "Dry Feed",     0.f,   100.f,  50.f,  Unit::Percent,      false},
@@ -45,6 +45,7 @@ inline constexpr ParamSpec kParamSpecs[SRParamCount] = {
     {SRParamFocusY,      "focusy",      "Focus Y",      0.f,   1.f,    0.5f,  Unit::Generic,      false},
     {SRParamFocusAmount, "focus",       "Focus",        0.f,   100.f,  0.f,   Unit::Percent,      false},
     {SRParamSub,         "sub",         "Sub",          0.f,   100.f,  0.f,   Unit::Percent,      false},
+    {SRParamAttack,      "attack",      "Attack",       1.f,   2000.f, 100.f, Unit::Milliseconds, true},
 };
 
 } // namespace sr

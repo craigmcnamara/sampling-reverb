@@ -70,10 +70,12 @@ public:
             shifters_[k].phase = 0.25f * k;  // stagger grain boundaries across lines
             subShifters_[k].prepare(sr_);
             subShifters_[k].phase = 0.125f + 0.25f * k;
-            subShifters_[k].setSemitones(-12.f);
-            subHp_[k] = 0.f;
+            subShifters_[k].setSemitones(kUndertoneSemitones[k]);
+            subHp_[k].set(55.f, 0.707f, sr_);
+            subHp_[k].reset();
+            shimmerHp_[k] = 0.f;
         }
-        subHpCoef_ = 1.f - std::exp(-kTwoPi * 35.f / sr_);
+        shimmerHpCoef_ = 1.f - std::exp(-kTwoPi * 80.f / sr_);
         lenCoef_ = 1.f - std::exp(-1.f / (0.15f * sr_));
     }
 
@@ -94,11 +96,15 @@ public:
     }
 
     void process(const float* inL, const float* inR, float* outL, float* outR, int n) {
-        // Shimmer lives inside the feedback loop: on a few lines, part of the recirculating signal is
-        // *replaced* by its pitch-shifted copy. The shifter never adds gain, so the loop stays at or
-        // below the decay gain and shimmer can build without running away.
-        const float shimmer = clampf(p_.shimmer, 0.f, 1.f) * 0.7f;
-        const float sub = clampf(p_.sub, 0.f, 1.f) * 0.9f;
+        // Shimmer and Sub live inside the feedback loop: on half the lines each, part of the
+        // recirculating signal is swapped for its pitch-shifted copy. The swap is an equal-power
+        // crossfade (cos/sin): the shifted copy is essentially uncorrelated with the original, so
+        // this keeps the energy per pass, and the layers add richness instead of draining the
+        // reverb's body. A linear crossfade lost up to half the energy every pass.
+        const float shimmerAngle = clampf(p_.shimmer, 0.f, 1.f) * kMaxShimmerCrossfade;
+        const float subAngle = clampf(p_.sub, 0.f, 1.f) * kMaxSubCrossfade;
+        const float shimmerDry = std::cos(shimmerAngle), shimmerWet = std::sin(shimmerAngle);
+        const float subDry = std::cos(subAngle), subWet = std::sin(subAngle);
         const bool freeze = p_.freeze;
         for (int i = 0; i < n; ++i) {
             float xl = freeze ? 0.f : inL[i];
@@ -119,17 +125,24 @@ public:
                 s[j] = freeze ? o[j] : lp_[j];
             }
             hadamard8(s);
-            if (shimmer > 0.f) {
-                for (int k = 0; k < kShimmerLines; ++k)
-                    s[k] = (1.f - shimmer) * s[k] + shimmer * shifters_[k].process(s[k]);
-            }
-            // Sub works the same way on the other half of the lines, always an octave down. A gentle
-            // high-pass stops repeated octave-down passes from piling up sub-sonic energy.
-            if (sub > 0.f) {
+            // Both shifted paths are high-passed: a grain shifter leaves very low frequencies (below
+            // its grain rate) almost unshifted, so they'd stay correlated with the original and grow
+            // on every pass under an equal-power crossfade.
+            if (shimmerAngle > 0.f) {
                 for (int k = 0; k < kShimmerLines; ++k) {
-                    const float down = subShifters_[k].process(s[kShimmerLines + k]);
-                    subHp_[k] += subHpCoef_ * (down - subHp_[k]);
-                    s[kShimmerLines + k] = (1.f - sub) * s[kShimmerLines + k] + sub * (down - subHp_[k]);
+                    const float up = shifters_[k].process(s[k]);
+                    shimmerHp_[k] += shimmerHpCoef_ * (up - shimmerHp_[k]);
+                    s[k] = shimmerDry * s[k] + shimmerWet * (up - shimmerHp_[k]);
+                }
+            }
+            // Sub follows the undertone series (f/2, f/2, f/3, f/4) on the other half of the lines, and
+            // cascades on every pass. A 2-pole 55 Hz high-pass keeps the undertones of low notes (which
+            // land at 20–40 Hz) from turning into rumble; the warmth stays in the 60–250 Hz range.
+            if (subAngle > 0.f) {
+                for (int k = 0; k < kShimmerLines; ++k) {
+                    float lp, hp;
+                    subHp_[k].process(subShifters_[k].process(s[kShimmerLines + k]), lp, hp);
+                    s[kShimmerLines + k] = subDry * s[kShimmerLines + k] + subWet * hp;
                 }
             }
             for (int j = 0; j < N; ++j) {
@@ -150,12 +163,19 @@ public:
         for (auto& a : diffR_) a.d.clear();
         for (auto& sh : shifters_) sh.d.clear();
         for (auto& sh : subShifters_) sh.d.clear();
-        for (float& v : subHp_) v = 0.f;
+        for (auto& f : subHp_) f.reset();
+        for (float& v : shimmerHp_) v = 0.f;
         for (float& v : lp_) v = 0.f;
     }
 
 private:
     static constexpr int kShimmerLines = N / 2;  // shimmer uses lines 0–3, sub uses lines 4–7
+    // Crossfade angle at 100%. Shimmer moves energy up into the range Tone damps fastest, so it
+    // gets a gentler maximum (sin = 0.71) than Sub (sin = 0.92) to keep the reverb's body.
+    static constexpr float kMaxShimmerCrossfade = 0.5f * kPi / 2;
+    static constexpr float kMaxSubCrossfade = 0.75f * kPi / 2;
+    // Undertone series: f/2, f/2, f/3 (an octave and a fifth down) and f/4 (two octaves down).
+    static constexpr float kUndertoneSemitones[kShimmerLines] = {-12.f, -12.f, -19.0196f, -24.f};
     static constexpr float kMinScale = 0.25f;
     static constexpr float kMaxScale = 2.f;
 
@@ -179,8 +199,9 @@ private:
     Allpass diffL_[4], diffR_[4];
     PitchShifter shifters_[kShimmerLines];
     PitchShifter subShifters_[kShimmerLines];
-    float subHp_[kShimmerLines] {};
-    float subHpCoef_ = 0.f;
+    SVF subHp_[kShimmerLines];
+    float shimmerHp_[kShimmerLines] {};
+    float shimmerHpCoef_ = 0.f;
 };
 
 } // namespace sr

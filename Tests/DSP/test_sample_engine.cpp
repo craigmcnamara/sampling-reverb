@@ -336,3 +336,182 @@ TEST_CASE(engine_voice_output_is_the_recorded_sound) {
     const size_t from = start + 2048 + sig::frames(0.05f, kSR);
     CHECK_NEAR(sig::zeroCrossingHz(rig.outL, from, from + sig::frames(0.2f, kSR), kSR), 440.f, 10.f);
 }
+
+// ---- Attack ----------------------------------------------------------------------------------
+
+namespace {
+
+// A sustained note: 5 ms attack, then constant level, so the replayed sample's own shape is flat.
+sig::Buffer pad(float hz, float seconds) {
+    sig::Buffer b = sig::sine(hz, seconds, 0.4f, kSR);
+    const size_t ramp = sig::frames(0.005f, kSR);
+    for (size_t i = 0; i < ramp; ++i) b[i] *= static_cast<float>(i) / ramp;
+    return b;
+}
+
+// Replays a captured pad and returns voice RMS just after the voice starts vs. 400–450 ms later.
+std::pair<float, float> voiceOnsetLevels(float attackSec) {
+    EngineParams p;
+    p.lengthSec = 1.f;
+    p.attackSec = attackSec;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 0.9f));
+    rig.wait(1.f);
+    const size_t start = rig.outL.size();
+    rig.run(pad(220.f, 0.9f));
+    size_t voice = start;
+    while (voice < rig.outL.size() && rig.outL[voice] == 0.f) ++voice;
+    REQUIRE(voice < rig.outL.size());
+    return {sig::rms(rig.outL, voice, voice + sig::frames(0.03f, kSR)),
+            sig::rms(rig.outL, voice + sig::frames(0.4f, kSR), voice + sig::frames(0.45f, kSR))};
+}
+
+} // namespace
+
+TEST_CASE(engine_short_attack_plays_samples_at_full_level_immediately) {
+    const auto [early, late] = voiceOnsetLevels(0.001f);
+    CHECK(early > 0.5f * late);
+}
+
+TEST_CASE(engine_long_attack_swells_samples_in) {
+    const auto [early, late] = voiceOnsetLevels(0.5f);
+    if (!(early < 0.1f * late)) std::printf("    early %g, late %g\n", early, late);
+    CHECK(early < 0.1f * late);
+    CHECK(late > 1e-3f);
+}
+
+// ---- Long samples ----------------------------------------------------------------------------
+
+TEST_CASE(engine_captures_and_replays_long_samples) {
+    EngineParams p;
+    p.lengthSec = 15.f;
+    p.attackSec = 0.001f;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 14.f));  // a long sustained note
+    rig.wait(2.f);
+    REQUIRE(rig.engine.poolCount() == 1);
+    const size_t start = rig.outL.size();
+    rig.run(note(220.f));
+    rig.wait(14.f);
+    // The replay is still sounding 12 s in: the whole long take was kept.
+    const size_t at = start + sig::frames(12.f, kSR);
+    CHECK(sig::rms(rig.outL, at, at + sig::frames(0.5f, kSR)) > 0.05f);
+    CHECK_NEAR(sig::zeroCrossingHz(rig.outL, at, at + sig::frames(0.5f, kSR), kSR), 220.f, 5.f);
+}
+
+TEST_CASE(engine_long_lengths_still_capture_overlapping_phrases) {
+    // With a 5 s Length, three distinct notes half a second apart all get recorded.
+    EngineParams p;
+    p.lengthSec = 5.f;
+    p.match = 0.f;
+    EngineRig rig(p);
+    for (float hz : {220.f, 330.f, 494.f}) {
+        rig.run(note(hz, 0.3f));
+        rig.wait(0.2f);
+    }
+    rig.wait(6.f);
+    CHECK(rig.engine.poolCount() == 3);
+    CHECK(rig.engine.totalCaptures() == 3);
+}
+
+TEST_CASE(engine_captured_samples_fade_in_and_out_without_clicks) {
+    EngineParams p;
+    p.lengthSec = 0.5f;
+    p.attackSec = 0.0005f;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 0.8f));  // still loud when the 0.5 s capture ends
+    rig.wait(1.f);
+    const size_t start = rig.outL.size();
+    rig.run(pad(220.f, 0.8f));
+    rig.wait(0.5f);
+    size_t first = start, last = 0;
+    while (first < rig.outL.size() && rig.outL[first] == 0.f) ++first;
+    for (size_t i = first; i < rig.outL.size(); ++i)
+        if (rig.outL[i] != 0.f) last = i;
+    REQUIRE(last > first);
+    const float middle = sig::rms(rig.outL, (first + last) / 2, (first + last) / 2 + 2400);
+    CHECK(std::fabs(rig.outL[first]) < 0.05f * middle);  // starts from silence
+    CHECK(std::fabs(rig.outL[last]) < 0.05f * middle);   // ends at silence, no cut-off click
+}
+
+TEST_CASE(engine_one_sustained_note_is_captured_once) {
+    EngineParams p;
+    p.lengthSec = 5.f;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 3.f));
+    rig.wait(3.f);
+    CHECK(rig.engine.totalCaptures() == 1);
+    CHECK(rig.engine.poolCount() == 1);
+}
+
+TEST_CASE(engine_repeating_a_note_during_its_long_capture_does_not_duplicate_it) {
+    EngineParams p;
+    p.lengthSec = 10.f;
+    EngineRig rig(p);
+    for (int i = 0; i < 3; ++i) {
+        rig.run(note(220.f, 0.3f));
+        rig.wait(0.7f);
+    }
+    rig.wait(9.f);
+    CHECK(rig.engine.totalCaptures() == 1);
+}
+
+// ---- Smooth endings --------------------------------------------------------------------------
+
+TEST_CASE(engine_density_steals_voices_with_a_gentle_release) {
+    // Two long samples at different pitches; with Density 1, triggering the second must fade the
+    // first out gently rather than chopping it.
+    EngineParams p;
+    p.lengthSec = 3.f;
+    p.density = 1;
+    p.attackSec = 0.001f;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 2.5f));
+    rig.wait(1.f);
+    rig.run(pad(660.f, 2.5f));
+    rig.wait(1.f);
+    REQUIRE(rig.engine.poolCount() == 2);
+
+    rig.run(note(220.f));  // plays the 220 Hz sample
+    rig.wait(0.5f);
+    const uint64_t before = rig.engine.totalTriggers();
+    size_t steal = 0;
+    sig::Buffer hit = note(660.f);
+    for (size_t i = 0; i < hit.size() && steal == 0; i += 256) {  // find the block that triggers it
+        const size_t n = std::min<size_t>(256, hit.size() - i);
+        rig.run(sig::Buffer(hit.begin() + i, hit.begin() + i + n));
+        if (rig.engine.totalTriggers() > before) steal = rig.outL.size();
+    }
+    REQUIRE(steal > 0);
+    rig.wait(0.5f);
+
+    const float held = sig::toneLevel(rig.outL, steal - sig::frames(0.06f, kSR), steal - sig::frames(0.01f, kSR), 220.f, kSR);
+    const float after = sig::toneLevel(rig.outL, steal + sig::frames(0.02f, kSR), steal + sig::frames(0.07f, kSR), 220.f, kSR);
+    if (!(after > 0.3f * held)) std::printf("    220 Hz level before steal %g, 20-70 ms after %g\n", held, after);
+    CHECK(held > 0.05f);
+    CHECK(after > 0.3f * held);
+}
+
+TEST_CASE(engine_samples_cut_mid_note_fade_out_gradually) {
+    // A note still sounding when Length ends: the replay should taper over a meaningful stretch,
+    // not drop out in the final few milliseconds.
+    EngineParams p;
+    p.lengthSec = 1.f;
+    p.attackSec = 0.001f;
+    EngineRig rig(p);
+    rig.run(pad(220.f, 1.5f));
+    rig.wait(1.f);
+    const size_t start = rig.outL.size();
+    rig.run(note(220.f));
+    rig.wait(1.5f);
+    size_t first = start, last = 0;
+    while (first < rig.outL.size() && rig.outL[first] == 0.f) ++first;
+    for (size_t i = first; i < rig.outL.size(); ++i)
+        if (rig.outL[i] != 0.f) last = i;
+    REQUIRE(last > first + sig::frames(0.8f, kSR));
+    const size_t mid = (first + last) / 2;
+    const float middle = sig::rms(rig.outL, mid, mid + sig::frames(0.05f, kSR));
+    const float nearEnd = sig::rms(rig.outL, last - sig::frames(0.15f, kSR), last - sig::frames(0.10f, kSR));
+    if (!(nearEnd < 0.7f * middle)) std::printf("    middle %g, 100-150 ms before the end %g\n", middle, nearEnd);
+    CHECK(nearEnd < 0.7f * middle);
+}
